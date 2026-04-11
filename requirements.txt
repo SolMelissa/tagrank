@@ -4,4 +4,4 @@ matplotlib
 numpy
 scipy
 trueskill
-hydrus_api>=5.0.0
+hydrus_api>=5.2.0

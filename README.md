@@ -27,10 +27,10 @@ TagRank stores a list of your previous comparisons in the `comparisons.json` fil
 
 ## Installation
 - Clone the repository or download the repository in another way.
-- make sure that you have python version 3.9 or higher installed.
+- make sure that you have python version 3.10 or higher installed.
 - install the requirements in requirements.txt using pip.
-- - For example, with `pip install requirements.txt`
-- - Or with `pip install requests requests PySide6 matplotlib numpy scipy trueskill hydrus_api>=5.0.0`
+- - For example, with `pip install -r requirements.txt`
+- - Or with `pip install requests PySide6 matplotlib numpy scipy trueskill hydrus_api>=5.2.0`
 - Now you can run main.py.
 
 
@@ -38,7 +38,6 @@ TagRank stores a list of your previous comparisons in the `comparisons.json` fil
 - TagRank has a small number of configuration files that it will guide you in creating.
 - Running main.py without setting up anything else will tell you what to do next.
 - In short, you need the following files in the working directory of this program.
-- - FILES_PATH: a file that contains the path to your client_files directory.
 - - ACCESS_KEY: a file that contains the hydrus API access key.
 - - URL: (optional) a file that contains the url that TagRank can access the hydrus API with.
 - - SEARCH_QUERY: (optional) a file that contains, line delimited, the search query that TagRank will use to find files to compare. If not provided it will be created and a default query will be inserted for you.

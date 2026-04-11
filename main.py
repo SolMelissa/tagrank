@@ -36,7 +36,7 @@ else:
         major, minor, patch = h_api_version.split(".")
         if int(major) < 5:
             print("Your hydrus_api version is not up to date!")
-            print(f"Tagrank is seeing version {h_api_version}, but requires at least version 5.0.0.")
+            print(f"Tagrank is seeing version {h_api_version}, but requires at least version 5.2.0.")
             print("You can update your hydrus_api version with the command `pip install --upgrade hydrus_api`.")
             print("If you have done so, tagrank is up to date, and this error still comes up please make a report on github or on discord.")
             print("Be sure to include the output of `pip freeze` and the error message you are now reading.")
@@ -86,8 +86,7 @@ def tags_from_file(file: FileMetaData) -> list[str]:
 
 
 class RatingSystem:
-    def __init__(self, files_path: Path, client: hydrus_api.Client, file_ids: list[int]):
-        self.files_path = files_path
+    def __init__(self, client: hydrus_api.Client, file_ids: list[int]):
         self.client = client
         self.file_ids = file_ids
         self.used_file_pairs: set[tuple[int, int]] = set()
@@ -173,10 +172,8 @@ class RatingSystem:
         return tuple(metadata)  # type: ignore
 
     def path_from_metadata(self, file_1_metadata: FileMetaData) -> Path:
-        file_hash = file_1_metadata["hash"]
-        extension = file_1_metadata["ext"]
-
-        return self.files_path / ("f" + file_hash[:2]) / (file_hash + extension)
+        file_id = file_1_metadata["file_id"]
+        return self.client.get_file_path(file_id)["path"]
 
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = tags_from_file(winner)
@@ -373,19 +370,6 @@ def print_access_key_info_then_exit() -> NoReturn:
     sys.exit(0)
 
 
-def print_files_path_info_then_exit() -> NoReturn:
-    print("  The FILES_PATH file is a file with name 'FILES_PATH' that needs to be in the same folder as the main.py file.")
-    print("  The content of the file must be the full path to the folder in your hydrus installation that ends in client_files.")
-    print("  It can for example look like this: '/home/user/Hydrus Network/db/client_files'.")
-    print("  Or, on windows: 'C:\\Users\\user\\Hydrus Network\\db\\client_files'.")
-    print()
-    print("  The hydrus client can tell you where the files are by going to:")
-    print("  Help -> About -> Description")
-    print("  Then, somewhere near the bottom it says 'db dir: <PATH HERE>'.")
-    print("  This is the exact path you should place in the FILES_PATH file.")
-    sys.exit(0)
-
-
 def print_verification_server_error_help_then_exit(e: None | hydrus_api.ServerError = None) -> NoReturn:
     print("ERROR: Something went wrong trying to verify your access key.")
     print("  Try re-creating your client api and saving the new access key. If need info on how. Remove the ACCESS_KEY file and restart TagRank.")
@@ -527,32 +511,9 @@ def create_client_or_exit() -> hydrus_api.Client:
 
 def run_for_rank_tags(client) -> None:
     files_path_path = Path("./FILES_PATH")
-    if not files_path_path.exists():
-        print("ERROR: FILES_PATH file does not exist.")
-        print_files_path_info_then_exit()
-
-    files_path_text = files_path_path.read_text()
-    if files_path_text == "":
-        print("ERROR: FILES_PATH file is empty.")
-        print_files_path_info_then_exit()
-
-    clean_path_text = files_path_text.removesuffix("\n").removesuffix("\\").removesuffix("/")
-
-    files_path = Path(clean_path_text)
-
-    # "f00" is one of the folders that the files are actually in.
-    if not (files_path / "f00").exists():
-        # files path does not exist. Did the user forgot this postfix?
-        if not clean_path_text.endswith("client_files"):
-            files_path = files_path / "client_files"
-
-        if not (files_path / "f00").exists():
-            print(f"ERROR: The files path '{Path(clean_path_text).resolve()}' does not exist.")
-            print_files_path_info_then_exit()
-
-    if not files_path.is_dir():
-        print(f"ERROR: the files path '{files_path}' is not a directory.")
-        print_files_path_info_then_exit()
+    if files_path_path.exists():
+        print("WARNING: The `./FILES_PATH` file is no longer needed. You can remove it.")
+        print(f"         The exact path is: {files_path_path.resolve()}")
 
     file_query_path = Path("./SEARCH_QUERY")
     if not file_query_path.exists():
@@ -561,7 +522,6 @@ def run_for_rank_tags(client) -> None:
 
     if file_query_path.read_text().strip() == "":
         print_empty_query_help_then_exit()
-
 
     if file_query_path.read_text().strip() == """
 system:number of tags > 5
@@ -578,7 +538,7 @@ system:limit = 500""".strip():
         print_no_relevant_files_then_exit(query)
 
     app = QtWidgets.QApplication(sys.argv)
-    rating_system = RatingSystem(files_path, client, relevant_files_ids["file_ids"])
+    rating_system = RatingSystem(client, relevant_files_ids["file_ids"])
     window: QtWidgets.QWidget = Window(rating_system)
 
     window.show()
@@ -708,7 +668,7 @@ def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
     delete_existing_sort_tags_if_needed(client)
 
     #  1. Find all images that have at least one of the scored tags.
-    rating_system = RatingSystem(Path("."), client, [])
+    rating_system = RatingSystem(client, [])
     tags = list(rating_system.current_ratings.keys())
 
     # The type does not include the "or search" system. Any nested list of tags is seen as OR.
