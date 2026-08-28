@@ -35,7 +35,7 @@ RATING_SERVICE_KEY = "de2e8e89a036355929f7ba9947ea5bdfd6978a548feed24f5cd639dc24
 
 POOL_SIZE            = 100          # final comparison pool size
 MAX_DISTANCE         = 10           # upper edge; used in the system:similar to predicate
-CANDIDATE_SEED_COUNT = 60           # diverse candidates fetched once
+CANDIDATE_SEED_COUNT = 10000           # diverse candidates fetched once
 SEED_COUNT_FOR_QUERY = 10           # how many seeds fold into the combined query
 API_LIMIT_FUZZ       = 2            # over-fetch multiplier to survive dedup
 TOP_TAG_OPTIONS      = 20           # how many "most liked" tags to offer
@@ -157,7 +157,10 @@ def build_pool(client: hydrus_api.Client | None = None,
     if DEBUG_MODE:
         logger.info(f"[DEBUG] using {len(seeds)} seeds for the combined similarity query")
 
-    predicates = [f"system:similar to {s} distance {MAX_DISTANCE}" for s in seeds]
+    seed_str = " ".join(seeds)
+    predicates = [f"system:similar to {seed_str} with distance {MAX_DISTANCE}",
+        f"system:limit = {pool_size * API_LIMIT_FUZZ}"]
+
     predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
 
     try:
