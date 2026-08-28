@@ -18,21 +18,19 @@ import matplotlib.pyplot as plt  # type: ignore
 import scipy.stats as stats  # type: ignore
 from trueskill import Rating, rate, BETA, global_env  # type: ignore
 import numpy as np
+from tagrank_pool import write_choice
 
 h_api_version = version('hydrus_api')
 
 if h_api_version is None:
-    # cannot check version for some reason.
     pass
 elif len(h_api_version.split(".")) < 3:
-    # Version is in a weird format. Ignore.
     pass
 else:
     try:
         major: str
         minor: str
         patch: str
-
         major, minor, patch = h_api_version.split(".")
         if int(major) < 5:
             print("Your hydrus_api version is not up to date!")
@@ -41,14 +39,8 @@ else:
             print("If you have done so, tagrank is up to date, and this error still comes up please make a report on github or on discord.")
             print("Be sure to include the output of `pip freeze` and the error message you are now reading.")
             sys.exit(1)
-
     except ValueError:
-        # failed to unpack. Ignore.
         pass
-
-    # we could do more with the minor or patch versions as well,
-    # and then build up some table of compatible `hydrus_api`, `hydrus`, and `tagrank` versions.
-    # that does not seem worth the effort for now, but if we get a lot more issues like this we may do so.
 
 DEFAULT_FILE_QUERY = ["system:number of tags > 5", "system:filetype = image", "system:limit = 5000"]
 AMOUNT_OF_TAGS_IN_CHARTS = 20
@@ -56,12 +48,9 @@ AMOUNT_OF_TAGS_IN_CHARTS = 20
 FileMetaData = dict[str, Any]
 
 try:
-    from itertools import batched  # introduced in 3.12
+    from itertools import batched
 except ImportError:
-
-    # taken from https://docs.python.org/3/library/itertools.html#itertools.batched
     def batched(iterable, n):
-        # batched('ABCDEFG', 3) --> ABC DEF G
         if n < 1:
             raise ValueError('n must be at least one')
         it = iter(iterable)
@@ -70,18 +59,14 @@ except ImportError:
 
 
 def tags_from_file(file: FileMetaData) -> list[str]:
-    # dict of tag repos that may have some tag info.
     tag_repos: dict[str, dict[str, Any]] = file["tags"]
     tags: set[str] = set()
     for repo in tag_repos.values():
         if repo["display_tags"] is not None:
             if str(hydrus_api.TagStatus.CURRENT.value) in repo["display_tags"]:
                 tags.update(repo["display_tags"][str(hydrus_api.TagStatus.CURRENT)])
-
             if str(hydrus_api.TagStatus.PENDING.value) in repo["display_tags"]:
                 tags.update(repo["display_tags"][str(hydrus_api.TagStatus.PENDING)])
-
-    # we need to go to list here since we need the ordering of this in keeping track of scores.
     return list(tags)
 
 
@@ -90,7 +75,6 @@ class RatingSystem:
         self.client = client
         self.file_ids = file_ids
         self.used_file_pairs: set[tuple[int, int]] = set()
-
         self.current_ratings: dict[str, Rating] = {}
 
         if Path("./ratings.json").exists():
@@ -100,11 +84,9 @@ class RatingSystem:
                     self.current_ratings[tag] = Rating(rating_params[0], rating_params[1])
 
         self.go_back_ratings_stack: list[dict[str, Rating]] = []
-
-        # where the winner is the first of the two file ids
         self.known_comparison_choices: list[Tuple[int, int]] = []
 
-        if Path("./comparisons.json").exists():  # if not exists, will be made on exit.
+        if Path("./comparisons.json").exists():
             try:
                 with open(Path("./comparisons.json")) as f:
                     comparisons = json.loads(f.read())
@@ -117,26 +99,20 @@ class RatingSystem:
     def process_undo(self):
         try:
             last_ratings = self.go_back_ratings_stack.pop()
-
-            # if the above pop throws this will not happen.
-            # This is good, since it ensures that we do not remove comparisons not made in this session,
             self.known_comparison_choices.pop()
         except IndexError:
-            return  # nothing to return to.
-
+            return
         for (tag, rating) in last_ratings.items():
             self.current_ratings[tag] = rating
 
     def write_results_to_file(self):
         with open(Path("./ratings.json"), "w") as f:
             f.write(json.dumps([(tag, [rating.mu, rating.sigma]) for tag, rating in self.current_ratings.items()]))
-
         with open(Path("./comparisons.json"), "w") as f:
             f.write(json.dumps([[first, second] for first, second in self.known_comparison_choices]))
 
     def get_file_pair(self) -> None | Tuple[FileMetaData, FileMetaData]:
         ids: list[int] = random.sample(self.file_ids, k=2)
-
         tries = 0
         while tuple(ids) in self.used_file_pairs:
             if tries > 20:
@@ -144,8 +120,6 @@ class RatingSystem:
                 return None
             ids = random.sample(self.file_ids, k=2)
             tries += 1
-
-        # mypy here does not know that this list of 2 ints turns into a tuple of 2 ints.
         self.used_file_pairs.add(tuple(ids))  # type: ignore
         return self.convert_image_ids_to_file_meta_data(tuple(ids))  # type: ignore
 
@@ -154,21 +128,18 @@ class RatingSystem:
         if info is None:
             print(f"ERROR: Was not able to find the file metadata objects for ids '{pairs}'.")
             return None
-
         metadata = info["metadata"]
         if metadata is None:
-            print(f"ERROR: The metadata object for the file pair '{pairs}' is None! (Maybe this script need to be updated?)")
+            print(f"ERROR: The metadata object for the file pair '{pairs}' is None!")
             return None
         if not isinstance(metadata, list):
-            print(f"ERROR: The metadata object for the file pair '{pairs}' is not a list! (Maybe this script needs to be updated?)")
+            print(f"ERROR: The metadata object for the file pair '{pairs}' is not a list!")
             print(f"  This is what I did get: {metadata}")
             return None
         if len(metadata) != 2:
             print(f"ERROR: Did not get two metadata objects for the file pairs '{pairs}'.")
             print(f"  This is what I did get: {metadata}")
             return None
-
-        # ignore the type here since mypy does not understand that we verified the type above.
         return tuple(metadata)  # type: ignore
 
     def path_from_metadata(self, file_1_metadata: FileMetaData) -> Path:
@@ -178,64 +149,44 @@ class RatingSystem:
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = tags_from_file(winner)
         loser_tags = tags_from_file(loser)
-
         winner_ratings = tuple([self.rating_for_tag(tag) for tag in winner_tags])
         loser_ratings = tuple([self.rating_for_tag(tag) for tag in loser_tags])
-
-        # lower rank is better.
         new_winner_ratings, new_loser_ratings = rate([winner_ratings, loser_ratings], ranks=[0, 1])
-
-        # first process loser then process winner, so that the tags that are in both images get the props for winning.
-        # We may want to experiment with only updating tags that are not on both images?
-        # though the issue there is that super common tags like 1girl would almost never get rated.
-        # and you may also get super weird ratings for tags that are barely ever used.
         go_back_ratings: dict[str, Rating] = dict()
         for tag, new_rating in zip(loser_tags, new_loser_ratings):
             go_back_ratings[tag] = self.current_ratings[tag]
             self.current_ratings[tag] = new_rating
-
         for tag, new_rating in zip(winner_tags, new_winner_ratings):
-            if tag not in loser_tags:  # otherwise we'd take the newly set value from the loser update here.
+            if tag not in loser_tags:
                 go_back_ratings[tag] = self.current_ratings[tag]
             self.current_ratings[tag] = new_rating
-
         self.go_back_ratings_stack.append(go_back_ratings)
-
         self.known_comparison_choices.append((winner["file_id"], loser["file_id"]))
 
     def rating_for_tag(self, tag: str) -> Rating:
         if tag not in self.current_ratings:
             self.current_ratings[tag] = Rating()
-
         return self.current_ratings[tag]
 
 
 class Window(QtWidgets.QWidget):
-    def __init__(self, rating_system: RatingSystem):
+    def __init__(self, rating_system: RatingSystem, client: hydrus_api.Client):
         super().__init__()
-
-        # these are set up in Window#perform_comparison_for_pair
+        self.client = client
         self.left_file_metadata: FileMetaData = {}
         self.right_file_metadata: FileMetaData = {}
-
         self.rating_system: RatingSystem = rating_system
-
         self.go_back_image_pairs_stack: list[Tuple[int, int]] = []
         self.comparisons = 0
-
         self.set_window_title_based_on_comparison_count()
         self.setLayout(QtWidgets.QHBoxLayout())
-
         self.leftImageLabel = QtWidgets.QLabel("left image")
         self.rightImageLabel = QtWidgets.QLabel("right image")
-
         self.layout().addWidget(self.leftImageLabel)
         self.layout().addWidget(self.rightImageLabel)
-
         for label in [self.leftImageLabel, self.rightImageLabel]:
             label.setMinimumWidth(500)
             label.setMinimumHeight(500)
-
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
 
     def set_window_title_based_on_comparison_count(self):
@@ -244,7 +195,6 @@ class Window(QtWidgets.QWidget):
     def store_image_pair_onto_undo_stack(self, left_metadata: FileMetaData, right_metadata: FileMetaData):
         left_id = left_metadata["file_id"]
         right_id = right_metadata["file_id"]
-
         self.go_back_image_pairs_stack.append((left_id, right_id))
 
     def store_metadata_and_show_images_for_comparison_pair(self, metadatas: Tuple[FileMetaData, FileMetaData] | None):
@@ -252,18 +202,15 @@ class Window(QtWidgets.QWidget):
             print("Was, for any reason, not able to load a pair of files. Shutting down now.")
             self.exit()
             return
-
         self.left_file_metadata, self.right_file_metadata = metadatas
-
         left_file_path = self.rating_system.path_from_metadata(self.left_file_metadata)
         right_file_path = self.rating_system.path_from_metadata(self.right_file_metadata)
-
         self.leftImageLabel.setPixmap(
             QtGui.QPixmap(left_file_path).scaled(self.leftImageLabel.size(), Qt.AspectRatioMode.KeepAspectRatio,
                                                  Qt.TransformationMode.FastTransformation))
         self.rightImageLabel.setPixmap(
             QtGui.QPixmap(right_file_path).scaled(self.rightImageLabel.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                                  Qt.TransformationMode.FastTransformation))
+                                                 Qt.TransformationMode.FastTransformation))
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         self.store_metadata_and_show_images_for_comparison_pair((self.left_file_metadata, self.right_file_metadata))
@@ -272,15 +219,10 @@ class Window(QtWidgets.QWidget):
         try:
             image_ids = self.go_back_image_pairs_stack.pop()
         except IndexError:
-            return  # nothing to go back to
-
-        # we don't want to store metadata objects as they are quite large. So we as the client for them again.
+            return
         meta_datas = self.rating_system.convert_image_ids_to_file_meta_data(image_ids)
-
-        # we need to make sure that the ratings are pulled back before the user can see the new images.
         self.rating_system.process_undo()
         self.store_metadata_and_show_images_for_comparison_pair(meta_datas)
-
         self.comparisons -= 1
         self.set_window_title_based_on_comparison_count()
 
@@ -288,55 +230,45 @@ class Window(QtWidgets.QWidget):
         key = event.key()
         if key == QtCore.Qt.Key.Key_Left or key == QtCore.Qt.Key.Key_A:
             self.rating_system.process_result(winner=self.left_file_metadata, loser=self.right_file_metadata)
+            write_choice(self.left_file_metadata["hash"], liked=True, client=self.client)
+            write_choice(self.right_file_metadata["hash"], liked=False, client=self.client)
         elif key == QtCore.Qt.Key.Key_Right or key == QtCore.Qt.Key.Key_D:
             self.rating_system.process_result(winner=self.right_file_metadata, loser=self.left_file_metadata)
+            write_choice(self.right_file_metadata["hash"], liked=True, client=self.client)
+            write_choice(self.left_file_metadata["hash"], liked=False, client=self.client)
         elif key == QtCore.Qt.Key.Key_Down or key == QtCore.Qt.Key.Key_S:
-            # print("No clear winner.")
-            # TODO: Maybe we want to process draws as well? (TrueSkill supports that.)
-            #       How does that influence the data?
             pass
         elif key == QtCore.Qt.Key.Key_Escape:
             self.exit()
             return
         elif key == QtCore.Qt.Key.Key_Backspace or key == QtCore.Qt.Key.Key_R:
             self.process_undo()
-            return  # return, since we don't want to move on to the next image pair below.
+            return
         elif key == QtCore.Qt.Key.Key_O:
             self.open_files_externally()
-            return  # return, since we don't want to move on to the next image pair below.
-        else:  # ignore this event
             return
-
+        else:
+            return
         self.comparisons += 1
         self.set_window_title_based_on_comparison_count()
-
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
 
     def open_files_externally(self) -> None:
-        # user asked us to open these files in another program.
         file_path_right = "file://" + str(self.rating_system.path_from_metadata(self.right_file_metadata).resolve())
         file_path_left = "file://" + str(self.rating_system.path_from_metadata(self.left_file_metadata).resolve())
-
         try:
-            # only available on windows. wew
             os.startfile(file_path_left)
             os.startfile(file_path_right)
         except AttributeError:
-            # does not always work, so we try the python way first.
             with contextlib.redirect_stdout:
-                # need to redirect since some browsers (Vivaldi, and thus I assume chromium)
-                # will print which browser "session" they open in for each file.
-                # cool information, but not relevant for our user.
-
                 QtGui.QDesktopServices.openUrl(file_path_left)
                 QtGui.QDesktopServices.openUrl(file_path_right)
 
     def exit(self) -> None:
-        self.close()  # calls the close event, which will save the results to file
+        self.close()
 
     def closeEvent(self, event) -> None:
-        # this is called by self.close(), and when the window is closed by Qt in any other way.
         self.prepare_to_quit()
 
     def prepare_to_quit(self):
@@ -360,10 +292,8 @@ def print_access_key_info_then_exit() -> NoReturn:
     print("  When you have done this. Place the access key in a file called 'ACCESS_KEY' in the same folder as the main.py file.")
     print("  Then exit these windows by pressing apply.")
     print()
-
     print("  Now you need to turn on the client API.")
     print_enable_client_api_help()
-
     print()
     print("  If you have a non-standard URL or PORT you can place the url in a file called URL in the same folder as the main.py file.")
     print("  It should roughly follow the format of 'http://127.0.0.1:45869/'.")
@@ -413,24 +343,14 @@ def print_no_relevant_files_then_exit(query: list[str]) -> NoReturn:
     print(f"  Are you sure I am allowed to search for files?")
     print(f"  I am specifically searching for files that are found by searching for the following query:")
     print(f"  {', '.join(query)}")
-    print(f"  If this query looks weird, change it in the SEARCH_QUERY file.")
+    print(f"  If this query looks weird, check your selection.")
     sys.exit(0)
-
-
-def print_search_query_help():
-    print("The search query file (SEARCH_QUERY) has just been made, and populated with the default query.")
-    print("Every line of this file is used as one 'tag' to search your client.")
-    print("You can do quite advanced things with this search. See the API documentation for more info.")
-    print("https://hydrusnetwork.github.io/hydrus/developer_api.html#get_files_search_files")
-    print("Scroll down a little to the `system predicates` expando to see examples of system queries you can do.")
 
 
 def print_empty_query_help_then_exit() -> NoReturn:
     print("ERROR: the file query is empty.")
     print("Since this may lead to very large queries, this is not allowed.")
-    print("If you really want the search to return all files, add 'system: everything' to the SEARCH_QUERY file.")
-    print("If you want to return to the default search query delete the SEARCH_QUERY file.")
-    print("It will be remade with the default query when you start this script again.")
+    print("If you really want the search to return all files, add 'system: everything'.")
     sys.exit(0)
 
 
@@ -443,8 +363,6 @@ def print_could_not_fetch_file_information_then_exit() -> NoReturn:
 def print_no_relevant_files_to_sort_then_exit() -> NoReturn:
     print("ERROR: Was not able to find any files to sort.")
     print("  Are you sure you have any ranked tags?")
-    print("  If so, are you sure that TagRank is allowed to search for files?")
-    print("  If so, please report this error to me.")
     sys.exit(0)
 
 
@@ -461,7 +379,7 @@ def print_add_tags_permissions_missing_info_then_exit() -> NoReturn:
 
 
 def trueskill_number_from_rating(rating: Rating) -> float:
-    return rating.mu - (3*rating.sigma)
+    return rating.mu - (3 * rating.sigma)
 
 
 def create_client_or_exit() -> hydrus_api.Client:
@@ -469,14 +387,11 @@ def create_client_or_exit() -> hydrus_api.Client:
     if not key_path.exists():
         print("ERROR: ACCESS_KEY file does not exist.")
         print_access_key_info_then_exit()
-
     access_key = key_path.read_text()
     if access_key == "":
         print("ERROR: ACCESS_KEY file is empty.")
         print_access_key_info_then_exit()
-
     access_key = access_key.removesuffix("\n")
-
     url_path = Path("./URL")
     if url_path.exists():
         url: str | None = url_path.read_text()
@@ -484,12 +399,7 @@ def create_client_or_exit() -> hydrus_api.Client:
             url = None
     else:
         url = None
-
-    if url is not None:
-        client = hydrus_api.Client(access_key, api_url=url)
-    else:
-        client = hydrus_api.Client(access_key)
-
+    client = hydrus_api.Client(access_key, api_url=url) if url is not None else hydrus_api.Client(access_key)
     access_key_response = None
     try:
         access_key_response = client.verify_access_key()
@@ -499,13 +409,10 @@ def create_client_or_exit() -> hydrus_api.Client:
         print_connection_error_help_then_exit(e)
     except hydrus_api.InsufficientAccess as e:
         print_permissions_error_then_exit(e)
-
     if access_key_response is None:
         print_verification_server_error_help_then_exit()
-
     if 3 not in access_key_response["basic_permissions"]:
         print_permissions_error_then_exit(None)
-
     return client
 
 
@@ -515,31 +422,24 @@ def run_for_rank_tags(client) -> None:
         print("WARNING: The `./FILES_PATH` file is no longer needed. You can remove it.")
         print(f"         The exact path is: {files_path_path.resolve()}")
 
-    file_query_path = Path("./SEARCH_QUERY")
-    if not file_query_path.exists():
-        file_query_path.write_text("\n".join(DEFAULT_FILE_QUERY))
-        print_search_query_help()
+    from tagrank_pool import build_pool, prompt_for_search
+    query = prompt_for_search()  # numbered most-liked tags, 0 = custom search
+    hashes = build_pool(client=client, query=query)
+    if not hashes:
+        print_no_relevant_files_then_exit(query)
 
-    if file_query_path.read_text().strip() == "":
-        print_empty_query_help_then_exit()
+    metadata_response = client.get_file_metadata(hashes=hashes)
+    if metadata_response is None or metadata_response.get("metadata") is None:
+        print_could_not_fetch_file_information_then_exit()
 
-    if file_query_path.read_text().strip() == """
-system:number of tags > 5
-system:filetype = image
-system:limit = 500""".strip():
-        print("You where using the previous default file_query. It has been updated to the following:")
-        print("\n".join(DEFAULT_FILE_QUERY))
-        file_query_path.write_text("\n".join(DEFAULT_FILE_QUERY))
+    ids = [int(meta["file_id"]) for meta in metadata_response["metadata"] if "file_id" in meta]
 
-    query = list(filter(lambda s: s != "", file_query_path.read_text().splitlines()))
-
-    relevant_files_ids = client.search_files(query, file_sort_type=hydrus_api.FileSortType.RANDOM)
-    if relevant_files_ids is None or relevant_files_ids["file_ids"] is None or len(relevant_files_ids["file_ids"]) < 2:
+    if len(ids) < 2:
         print_no_relevant_files_then_exit(query)
 
     app = QtWidgets.QApplication(sys.argv)
-    rating_system = RatingSystem(client, relevant_files_ids["file_ids"])
-    window: QtWidgets.QWidget = Window(rating_system)
+    rating_system = RatingSystem(client, ids)
+    window: QtWidgets.QWidget = Window(rating_system, client)
 
     window.show()
     first_section_result = app.exec()
@@ -555,45 +455,25 @@ system:limit = 500""".strip():
     largest_mu_width = len(str(math.floor(trueskill_number_from_rating(many_tags[0][1]))))
     print("The window that shows the scores can be hard to read. So here the data in text for 100 tags:")
     for (tag, rating) in many_tags:
-                                                                # +3 for the three decimals
-        print(f"{trueskill_number_from_rating(rating):.3f}".rjust(largest_mu_width+3) + f": {tag}")
+        print(f"{trueskill_number_from_rating(rating):.3f}".rjust(largest_mu_width + 3) + f": {tag}")
 
     best_tags: list[Tuple[str, Rating]] = many_tags[:AMOUNT_OF_TAGS_IN_CHARTS]
-
     for (tag, rating) in best_tags:
         (mu, sigma) = rating
         x_space = np.linspace(mu - 3 * sigma, mu + 3 * sigma, 100)
         y_space = stats.norm.pdf(x_space, mu, sigma)
-        plt.plot(
-            x_space,
-            y_space,
-            label=f"{tag} (score:{trueskill_number_from_rating(rating):.2f})"
-        )
-
-    plt.legend()  # show a legend
+        plt.plot(x_space, y_space, label=f"{tag} (score:{trueskill_number_from_rating(rating):.2f})")
+    plt.legend()
     plt.show()
 
-    # TODO: Choose files to play against each other. Maybe use some halfway point between high and low win prob?
-    #       Or use files where win prob is ~50% so that we get "new" info
 
-    # TODO: Test between (not) including duplicate tags in the scoring.
-    #       How does this affect the scoring tags?
-    #       Will super common tags stay in the middle since they aren't played very often?
-    #       Maybe this will happen regardless since they win and loose as commonly.
-
-
-def compare_two_teams(left_file: Tuple[int, list[Rating]], right_file:Tuple[int, list[Rating]]) -> int:
+def compare_two_teams(left_file: Tuple[int, list[Rating]], right_file: Tuple[int, list[Rating]]) -> int:
     left_team = left_file[1]
     right_team = right_file[1]
     p = win_probability(left_team, right_team)
-
-    # p is in (0..1), where 1 means left team has 100% chance of winning.
-    # Since left < right means we need to return negative, we can do that with -0.5
-    # This means that p > 0.5 (left would win) returns >0, and draw, p=0.5, returns 0.
     return p - 0.5
 
 
-# taken from issue #1 on the trueskill repo. It is also provided on their site.
 def win_probability(team1, team2):
     delta_mu = sum(r.mu for r in team1) - sum(r.mu for r in team2)
     sum_sigma = sum(r.sigma ** 2 for r in itertools.chain(team1, team2))
@@ -610,25 +490,18 @@ def delete_existing_sort_tags_if_needed(client: hydrus_api.Client) -> None:
         print("Please check your permissions with the following help text.")
         print("If this does not help please report this error.")
         print_permissions_error_then_exit(None)
-
     if len(response["file_ids"]) == 0:
         return
-
     print("You still have files with the TagRankSort tags from an earlier sort attempt!")
-
     still_has_tags_response = get_file_infos_from_client(client, response["file_ids"])
-
     for (file_id, metadata) in still_has_tags_response:
         for (tag_repo_identifier, tag_repo_data) in metadata["tags"].items():
             if "0" not in tag_repo_data["display_tags"]:
                 continue
-
-            previous_sort_tags = [tag for tag in tag_repo_data["display_tags"]["0"] if
-                                  tag.startswith("TagRankSort:")]
+            previous_sort_tags = [tag for tag in tag_repo_data["display_tags"]["0"] if tag.startswith("TagRankSort:")]
             if len(previous_sort_tags) > 0:
                 client.add_tags(file_ids=[file_id], service_keys_to_actions_to_tags={
                     tag_repo_identifier: {hydrus_api.TagAction.DELETE: previous_sort_tags}})
-
     print("Existing sort tags deleted.")
 
 
@@ -642,7 +515,6 @@ def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -
         file_infos_response = client.get_file_metadata(file_ids=chunk_of_ids)
         if file_infos_response is None or file_infos_response["metadata"] is None:
             print_could_not_fetch_file_information_then_exit()
-
         file_ids_to_tags.extend((info["file_id"], info) for info in file_infos_response["metadata"])
 
     if len(file_ids) < GET_FILE_INFO_FROM_CLIENT_CHUNK_SIZE:
@@ -652,11 +524,9 @@ def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -
     chunks = math.ceil(len(file_ids) / GET_FILE_INFO_FROM_CLIENT_CHUNK_SIZE)
     print(f"Getting file info from the client in {chunks} chunks.")
     print("Chunks done: 0", end="")
-
     for (index, id_batch) in enumerate(batched(file_ids, GET_FILE_INFO_FROM_CLIENT_CHUNK_SIZE), start=1):
         get_and_process_one_chunk(id_batch)
         print(f"\rChunks done: {index}", end="", flush=True)
-
     print("\rChunks done: ALL")
     return file_ids_to_tags
 
@@ -664,41 +534,25 @@ def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -
 def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
     if hydrus_api.Permission.ADD_TAGS not in client.verify_access_key()["basic_permissions"]:
         print_add_tags_permissions_missing_info_then_exit()
-
     delete_existing_sort_tags_if_needed(client)
-
-    #  1. Find all images that have at least one of the scored tags.
     rating_system = RatingSystem(client, [])
     tags = list(rating_system.current_ratings.keys())
-
-    # The type does not include the "or search" system. Any nested list of tags is seen as OR.
     # noinspection PyTypeChecker
     response = client.search_files(tags=[tags])
-
     if response is None or response["file_ids"] is None or len(response["file_ids"]) == 0:
         print_no_relevant_files_to_sort_then_exit()
-
     file_ids = [int(file_id) for file_id in response["file_ids"]]
-
     print(f"Found {len(file_ids)} files that have at least one ranked tag.")
-
-    file_ids_to_tags: list[Tuple[int, list[str]]] = [(file_id, tags_from_file(metadata)) for (file_id, metadata) in get_file_infos_from_client(client, file_ids)]
-
+    file_ids_to_tags: list[Tuple[int, list[str]]] = [(file_id, tags_from_file(metadata))
+                                                     for (file_id, metadata) in get_file_infos_from_client(client, file_ids)]
     print("Got the tags for each file from the client.")
-
-    file_ids_to_ratings: list[Tuple[int, list[Rating]]] = [(file_id, [rating_system.rating_for_tag(tag) for tag in tags]) for (file_id, tags) in file_ids_to_tags]
-
+    file_ids_to_ratings: list[Tuple[int, list[Rating]]] = [
+        (file_id, [rating_system.rating_for_tag(tag) for tag in tags]) for (file_id, tags) in file_ids_to_tags]
     print("Now sorting the list... This may take a very long time!")
-    #  2. Sort the list using the 1v1 win probability.
-    # Note that we pass in reverse is true, since otherwise the worst item would be first.
     sorted_file_ids_to_ratings = sorted(file_ids_to_ratings, key=cmp_to_key(compare_two_teams), reverse=True)
-
     print("Sorted the list. Now setting the sort-order tags in hydrus.")
-
     services_response = client.get_services()
-
     services_map = services_response["services"]
-
     found_service_id = None
     for service_id, service_data in services_map.items():
         if service_data["type"] == hydrus_api.ServiceType.TAG_DOMAIN:
@@ -706,10 +560,8 @@ def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
                 found_service_id = service_id
             if service_data["name"] == "my tags":
                 found_service_id = service_id
-
     for (index, (file_id, _)) in enumerate(sorted_file_ids_to_ratings):
         client.add_tags(file_ids=[file_id], service_keys_to_tags={found_service_id: [f"TagRankSort:{index}"]})
-
     print("Have sent all the tags to the client.")
     print("DONE! If you need info on how to use this to sort your files, read below:")
     print("  You can use this sort order by clicking the 'sort by(...)' button on the top left of a file search column. ")
@@ -722,13 +574,11 @@ def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
     print("  Click the first button to the right of the text 'Default File Sort'")
     print("  Here, select Namespaces, and click the 'sort by tags: TagRankSort' option that you just created.")
     print()
-
     input("Press Enter to exit...")
 
 
 def main(mode: str) -> None:
     client = create_client_or_exit()
-
     if mode == MODE_RANK_TAGS:
         run_for_rank_tags(client)
     elif mode == MODE_CREATE_IMAGE_RANKING:
@@ -741,14 +591,6 @@ MODE_CREATE_IMAGE_RANKING = "create_image_ranking"
 MODE_RANK_TAGS = "rank_tags"
 
 if __name__ == "__main__":
-    if sys.argv:
-        arguments = sys.argv
-    else:
-        arguments = []
-
-    if "--create_image_ranking" in arguments:
-        mode = MODE_CREATE_IMAGE_RANKING
-    else:
-        mode = MODE_RANK_TAGS
-
+    arguments = sys.argv
+    mode = MODE_CREATE_IMAGE_RANKING if "--create_image_ranking" in arguments else MODE_RANK_TAGS
     main(mode)
