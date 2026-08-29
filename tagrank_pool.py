@@ -37,6 +37,7 @@ from config import (
     get_float_or_none,
     get_list,
     key,
+    is_filtered_tag,
 )
 
 # --- pull settings out of config/KEYS and config/SETTINGS ---
@@ -53,6 +54,8 @@ CANDIDATE_SEED_COUNT = get_int("CANDIDATE_SEED_COUNT", 10000)
 SEED_COUNT_FOR_QUERY = get_int("SEED_COUNT_FOR_QUERY", 10)
 API_LIMIT_FUZZ       = get_int("API_LIMIT_FUZZ", 2)
 TOP_TAG_OPTIONS      = get_int("TOP_TAG_OPTIONS", 20)
+BOTTOM_TAG_OPTIONS   = get_int("BOTTOM_TAG_OPTIONS", 10)
+RANDOM_TAG_OPTIONS   = get_int("RANDOM_TAG_OPTIONS", 10)
 DEBUG_MODE           = get_bool("DEBUG_MODE", True)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -83,7 +86,9 @@ def load_ratings() -> dict[str, tuple[float, float]]:
     for entry in data:
         try:
             tag, (mu, sigma) = entry
-            ratings[str(tag)] = (float(mu), float(sigma))
+            tag_str = str(tag)
+            if not is_filtered_tag(tag_str):
+                ratings[tag_str] = (float(mu), float(sigma))
         except (ValueError, TypeError):
             continue
     return ratings
@@ -96,22 +101,79 @@ def trueskill_score(rating: tuple[float, float]) -> float:
 
 
 def prompt_for_search() -> list[str]:
-    """Offer the user a numbered list of their most-liked tags (0 = custom)."""
+    """Offer a numbered list of top/bottom/random liked tags, or custom."""
     ratings = load_ratings()
-    ranked = sorted(ratings.items(), key=lambda kv: trueskill_score(kv[1]), reverse=True)
-    top = ranked[:TOP_TAG_OPTIONS]
+    ranked = sorted(ratings.items(), key=lambda kv: trueskill_score(kv[1]))
+
+    all_tags = [
+        tag for tag, _rating in ranked
+        if not tag.startswith("filename:") and not is_filtered_tag(tag)
+    ]
+
+    top_tags = all_tags[-TOP_TAG_OPTIONS:] if TOP_TAG_OPTIONS > 0 else []
+    bottom_tags = all_tags[:BOTTOM_TAG_OPTIONS] if BOTTOM_TAG_OPTIONS > 0 else []
+
+    # Strongest first for Top, lowest first for Bottom
+    top_tags = list(reversed(top_tags))
+
+    excluded = set(top_tags) | set(bottom_tags)
+    remaining = [tag for tag in all_tags if tag not in excluded]
+    random_tags = (
+        random.sample(remaining, k=min(RANDOM_TAG_OPTIONS, len(remaining)))
+        if RANDOM_TAG_OPTIONS > 0
+        else []
+    )
+
+    categories = {
+        "Top": top_tags,
+        "Random": random_tags,
+        "Bottom": bottom_tags,
+    }
 
     print("\n=== TagRank Search Selection ===")
-    print("Pick a search start point (your most-liked tags), or 0 for a custom search.")
-    if not top:
+    print("Pick a search start point, or 00 for a custom search.")
+    if not any(categories.values()):
         print("(No ratings found yet - falling straight to custom search.)")
-    for i, (tag, _rating) in enumerate(top, start=1):
-        print(f"  {i}: {tag}")
-    print("  0: custom search (comma-separated predicates; blank = everything)")
+
+    ordered_rows: list[tuple[str, str]] = []
+    for label in ["Top", "Random", "Bottom"]:
+        for tag in categories[label]:
+            ordered_rows.append((label, tag))
+
+    # column layout
+    max_rows = max(len(categories[k]) for k in ("Top", "Random", "Bottom")) if any(categories.values()) else 0
+    col_width = 32
+
+    print(f"  {'Top':<{col_width}} {'Random':<{col_width}} Bottom")
+    top_list = list(enumerate(categories["Top"], start=1))
+    random_list = list(enumerate(categories["Random"], start=1 + len(categories["Top"])))
+    bottom_list = list(enumerate(categories["Bottom"], start=1 + len(categories["Top"]) + len(categories["Random"])))
+
+    lookup = {tag: idx for idx, tag in top_list + random_list + bottom_list}
+    per_label = {"Top": top_list, "Random": random_list, "Bottom": bottom_list}
+
+    for row in range(max_rows):
+        cells = []
+        for label in ["Top", "Random", "Bottom"]:
+            if row < len(per_label[label]):
+                idx, tag = per_label[label][row]
+                score = trueskill_score(ratings.get(tag, (0.0, 0.0)))
+                parts = tag.split(":", 1)
+                if len(parts) == 2:
+                    main, group = parts
+                    display = f"{idx:02d}: [{score:.1f}] {main} ({group})"
+                else:
+                    display = f"{idx:02d}: [{score:.1f}] {tag}"
+                cells.append(display)
+            else:
+                cells.append("")
+        print(f"  {cells[0]:<{col_width}} {cells[1]:<{col_width}} {cells[2]}")
+
+    print("  00: custom search (comma-separated predicates; blank = everything)")
 
     while True:
         raw = input("\n> ").strip()
-        if raw == "0":
+        if raw == "00":
             custom = input("Custom search (comma-separated, e.g. '1girl, rating:safe'): ").strip()
             if not custom:
                 return ["system:everything"]
@@ -121,10 +183,12 @@ def prompt_for_search() -> list[str]:
         except ValueError:
             print("  Please enter a number.")
             continue
-        if 1 <= idx <= len(top):
-            tag = top[idx - 1][0]
+
+        if 1 <= idx <= len(ordered_rows):
+            tag = ordered_rows[idx - 1][1]
             print(f"  Using tag search: {tag}")
             return [tag]
+
         print("  Selection out of range.")
 
 

@@ -19,7 +19,7 @@ import scipy.stats as stats  # type: ignore
 from trueskill import Rating, rate, BETA, global_env  # type: ignore
 import numpy as np
 from tagrank_pool import write_choice
-from config import ensure_config_files, key, get_int, get_list
+from config import ensure_config_files, key, get_int, get_list, is_filtered_tag
 
 h_api_version = version('hydrus_api')
 
@@ -68,9 +68,11 @@ def tags_from_file(file: FileMetaData) -> list[str]:
     for repo in tag_repos.values():
         if repo["display_tags"] is not None:
             if str(hydrus_api.TagStatus.CURRENT.value) in repo["display_tags"]:
-                tags.update(repo["display_tags"][str(hydrus_api.TagStatus.CURRENT)])
+                tags.update(tag for tag in repo["display_tags"][str(hydrus_api.TagStatus.CURRENT)]
+                            if not tag.startswith("filename:") and not is_filtered_tag(tag))
             if str(hydrus_api.TagStatus.PENDING.value) in repo["display_tags"]:
-                tags.update(repo["display_tags"][str(hydrus_api.TagStatus.PENDING)])
+                tags.update(tag for tag in repo["display_tags"][str(hydrus_api.TagStatus.PENDING)]
+                            if not tag.startswith("filename:") and not is_filtered_tag(tag))
     return list(tags)
 
 
@@ -85,7 +87,8 @@ class RatingSystem:
             with open(Path("./ratings.json")) as f:
                 tag_to_ratings = json.loads(f.read())
                 for tag, rating_params in tag_to_ratings:
-                    self.current_ratings[tag] = Rating(rating_params[0], rating_params[1])
+                    if not tag.startswith("filename:") and not is_filtered_tag(tag):
+                        self.current_ratings[tag] = Rating(rating_params[0], rating_params[1])
 
         self.go_back_ratings_stack: list[dict[str, Rating]] = []
         self.known_comparison_choices: list[Tuple[int, int]] = []
@@ -153,22 +156,25 @@ class RatingSystem:
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = tags_from_file(winner)
         loser_tags = tags_from_file(loser)
-        winner_ratings = tuple([self.rating_for_tag(tag) for tag in winner_tags])
-        loser_ratings = tuple([self.rating_for_tag(tag) for tag in loser_tags])
+        winner_ratings = tuple([self.rating_for_tag(tag) for tag in winner_tags
+                               if not tag.startswith("filename:") and not is_filtered_tag(tag)])
+        loser_ratings = tuple([self.rating_for_tag(tag) for tag in loser_tags
+                              if not tag.startswith("filename:") and not is_filtered_tag(tag)])
         new_winner_ratings, new_loser_ratings = rate([winner_ratings, loser_ratings], ranks=[0, 1])
         go_back_ratings: dict[str, Rating] = dict()
         for tag, new_rating in zip(loser_tags, new_loser_ratings):
-            go_back_ratings[tag] = self.current_ratings[tag]
-            self.current_ratings[tag] = new_rating
-        for tag, new_rating in zip(winner_tags, new_winner_ratings):
-            if tag not in loser_tags:
+            if not tag.startswith("filename:") and not is_filtered_tag(tag):
                 go_back_ratings[tag] = self.current_ratings[tag]
-            self.current_ratings[tag] = new_rating
+                self.current_ratings[tag] = new_rating
+        for tag, new_rating in zip(winner_tags, new_winner_ratings):
+            if not tag.startswith("filename:") and not is_filtered_tag(tag) and tag not in loser_tags:
+                go_back_ratings[tag] = self.current_ratings[tag]
+                self.current_ratings[tag] = new_rating
         self.go_back_ratings_stack.append(go_back_ratings)
         self.known_comparison_choices.append((winner["file_id"], loser["file_id"]))
 
     def rating_for_tag(self, tag: str) -> Rating:
-        if tag not in self.current_ratings:
+        if tag not in self.current_ratings and not tag.startswith("filename:") and not is_filtered_tag(tag):
             self.current_ratings[tag] = Rating()
         return self.current_ratings[tag]
 
