@@ -20,7 +20,7 @@ MIN_POOL_SATISFIED = 30      # empty = None (treat e.g. 60% of pool_size as "eno
 TOP_TAG_OPTIONS = 15       # how many "most liked" tags to offer
 BOTTOM_TAG_OPTIONS = 15    # how many "least liked" tags to offer
 RANDOM_TAG_OPTIONS = 15    # how many random tags to offer
-AMOUNT_OF_TAGS_IN_CHARTS = 20
+AMOUNT_OF_TAGS_IN_CHARTS = 15
 DEBUG_MODE = True
 # =============================================================
 TOP_TAG_OPTIONS      = get_int("TOP_TAG_OPTIONS", 20)
