@@ -19,6 +19,7 @@ import scipy.stats as stats  # type: ignore
 from trueskill import Rating, rate, BETA, global_env  # type: ignore
 import numpy as np
 from tagrank_pool import write_choice
+from config import ensure_config_files, key, get_int, get_list
 
 h_api_version = version('hydrus_api')
 
@@ -42,8 +43,11 @@ else:
     except ValueError:
         pass
 
-DEFAULT_FILE_QUERY = ["system:number of tags > 5", "system:filetype = image", "system:limit = 5000"]
-AMOUNT_OF_TAGS_IN_CHARTS = 20
+DEFAULT_FILE_QUERY = get_list(
+    "DEFAULT_FILE_QUERY",
+    ["system:number of tags > 5", "system:filetype = image", "system:limit = 5000"],
+)
+AMOUNT_OF_TAGS_IN_CHARTS = get_int("AMOUNT_OF_TAGS_IN_CHARTS", 20)
 
 FileMetaData = dict[str, Any]
 
@@ -289,20 +293,21 @@ def print_access_key_info_then_exit() -> NoReturn:
     print("  You need to create a client api service via services->review services->local->client api->add->manually")
     print("  It needs to have the permission search and fetch files.")
     print("  You can blacklist any tags you want, but they won't get ranked if this program cannot see them.")
-    print("  When you have done this. Place the access key in a file called 'ACCESS_KEY' in the same folder as the main.py file.")
+    print("  When you have done this, open the config/KEYS file (created on first run)")
+    print("  and set API_KEY to your access key. The file is git-ignored.")
     print("  Then exit these windows by pressing apply.")
     print()
     print("  Now you need to turn on the client API.")
     print_enable_client_api_help()
     print()
-    print("  If you have a non-standard URL or PORT you can place the url in a file called URL in the same folder as the main.py file.")
-    print("  It should roughly follow the format of 'http://127.0.0.1:45869/'.")
+    print("  If you have a non-standard URL or PORT set API_URL in config/KEYS too,")
+    print("  e.g. 'http://127.0.0.1:45869/'.")
     sys.exit(0)
 
 
 def print_verification_server_error_help_then_exit(e: None | hydrus_api.ServerError = None) -> NoReturn:
     print("ERROR: Something went wrong trying to verify your access key.")
-    print("  Try re-creating your client api and saving the new access key. If need info on how. Remove the ACCESS_KEY file and restart TagRank.")
+    print("  Try re-creating your client api and saving the new access key. If need info on how. Re-set API_KEY in config/KEYS and restart TagRank.")
     if e is not None:
         print("  If that does not solve your issue, then look at the error that hydrus gave me below.")
         print("  Read it all, but the last line is probably where you'll find what is wrong.")
@@ -329,7 +334,7 @@ def print_enable_client_api_help():
 
 def print_permissions_error_then_exit(e: (hydrus_api.InsufficientAccess | None) = None) -> NoReturn:
     print("ERROR: This access key is not allowed to search for and fetch files.")
-    print("  Please allow this permission for the access key you put in the ACCESS_KEY file.")
+    print("  Please allow this permission for the access key you set in the config/KEYS file.")
     print("  You can find this setting at: services->review services->local->client api")
     print()
     if e is not None:
@@ -383,23 +388,12 @@ def trueskill_number_from_rating(rating: Rating) -> float:
 
 
 def create_client_or_exit() -> hydrus_api.Client:
-    key_path = Path("./ACCESS_KEY")
-    if not key_path.exists():
-        print("ERROR: ACCESS_KEY file does not exist.")
+    access_key = key("API_KEY").strip()
+    if not access_key or access_key == "FILL_ME_IN":
+        print("ERROR: No API_KEY found in the config/KEYS file.")
         print_access_key_info_then_exit()
-    access_key = key_path.read_text()
-    if access_key == "":
-        print("ERROR: ACCESS_KEY file is empty.")
-        print_access_key_info_then_exit()
-    access_key = access_key.removesuffix("\n")
-    url_path = Path("./URL")
-    if url_path.exists():
-        url: str | None = url_path.read_text()
-        if url == "":
-            url = None
-    else:
-        url = None
-    client = hydrus_api.Client(access_key, api_url=url) if url is not None else hydrus_api.Client(access_key)
+    url = key("API_URL").strip() or None
+    client = hydrus_api.Client(access_key, api_url=url) if url else hydrus_api.Client(access_key)
     access_key_response = None
     try:
         access_key_response = client.verify_access_key()
@@ -578,6 +572,7 @@ def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
 
 
 def main(mode: str) -> None:
+    ensure_config_files()
     client = create_client_or_exit()
     if mode == MODE_RANK_TAGS:
         run_for_rank_tags(client)

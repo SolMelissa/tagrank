@@ -1,0 +1,7 @@
+# Put one tag prefix or exact tag per line.
+# Matching tags will be excluded from ranking and pool selection.
+hydl-import-time:
+title:
+bluesky post id:
+hydl-sub-id:
+rule34 id:

@@ -10,15 +10,16 @@ The pool's "start point" is chosen interactively via prompt_for_search():
 it reads ratings.json, ranks every tag by its TrueSkill score (mu - 3*sigma),
 and offers the top tags as numbered options. Selecting one uses it as the
 search predicates; 0 opens a custom (comma-separated) search. This decouples
-the dataset from the SEARCH_QUERY file, so editing that file no longer silently
-swaps the pool.
+the dataset from the SEARCH_QUERY setting, so editing that setting no longer
+silently swaps the pool.
 
 Pool assembly
 -------------
 Similarity search uses hydrus's perceptual-hash engine via the system predicate
 `system:similar to <hash> distance <n>`. Multiple such predicates fold into ONE
 /search_files call capped with `system:limit = pool_size * fuzz`, so hydrus
-returns ~pool_size similar files in a single round-trip (no 40x seed re-queries).
+returns ~pool_size similar files in a single round-trip (no 40x seed re-
+queries).
 """
 
 import json
@@ -28,20 +29,31 @@ from pathlib import Path
 
 import hydrus_api
 
-# ============================ CONFIG ============================
-API_URL            = "http://127.0.0.1:45869/"
-API_KEY            = "f7b95d14bc3a1d9519a316a4e8b111b66b2f368b4c180ef7811f7be6b7bef552"
-RATING_SERVICE_KEY = "de2e8e89a036355929f7ba9947ea5bdfd6978a548feed24f5cd639dc24c37f0a"
+from config import (
+    CONFIG_DIR,
+    ensure_config_files,
+    get_int,
+    get_bool,
+    get_float_or_none,
+    get_list,
+    key,
+)
 
-POOL_SIZE            = 100          # final comparison pool size
-MAX_DISTANCE         = 10           # upper edge; used in the system:similar to predicate
-CANDIDATE_SEED_COUNT = 10000           # diverse candidates fetched once
-SEED_COUNT_FOR_QUERY = 10           # how many seeds fold into the combined query
-API_LIMIT_FUZZ       = 2            # over-fetch multiplier to survive dedup
-TOP_TAG_OPTIONS      = 20           # how many "most liked" tags to offer
+# --- pull settings out of config/KEYS and config/SETTINGS ---
+API_URL            = key("API_URL", "http://127.0.0.1:45869/")
+API_KEY            = key("API_KEY")
+RATING_SERVICE_KEY = key("RATING_SERVICE_KEY")
 
-DEBUG_MODE = True
-# ================================================================
+POOL_SIZE            = get_int("POOL_SIZE", 100)
+MAX_DISTANCE_START  = get_int("MAX_DISTANCE_START", 10)
+DISTANCE_STEP       = get_int("DISTANCE_STEP", 2)
+MAX_DISTANCE_HARD   = get_int("MAX_DISTANCE_HARD", 64)
+MIN_POOL_SATISFIED  = get_float_or_none("MIN_POOL_SATISFIED", None)
+CANDIDATE_SEED_COUNT = get_int("CANDIDATE_SEED_COUNT", 10000)
+SEED_COUNT_FOR_QUERY = get_int("SEED_COUNT_FOR_QUERY", 10)
+API_LIMIT_FUZZ       = get_int("API_LIMIT_FUZZ", 2)
+TOP_TAG_OPTIONS      = get_int("TOP_TAG_OPTIONS", 20)
+DEBUG_MODE           = get_bool("DEBUG_MODE", True)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -137,15 +149,11 @@ def get_candidate_seeds(query: list[str], n: int, client: hydrus_api.Client) -> 
 def build_pool(client: hydrus_api.Client | None = None,
                pool_size: int = POOL_SIZE,
                query: list[str] | None = None) -> list[str]:
-    """Assemble a pool of up to `pool_size` visually-similar hashes.
-
-    `query` selects the starting seed set. If None, falls back to SEARCH_QUERY.
-    """
     client = client or _get_default_client()
     if query is None:
         query = _legacy_seed_predicates()
 
-    logger.info(f"Building pool of {pool_size} files (Distance: 0-{MAX_DISTANCE})...")
+    logger.info(f"Building pool of {pool_size} files (Distance: start {MAX_DISTANCE_START}, step {DISTANCE_STEP})...")
 
     candidates = get_candidate_seeds(query, CANDIDATE_SEED_COUNT, client)
     if not candidates:
@@ -154,44 +162,47 @@ def build_pool(client: hydrus_api.Client | None = None,
 
     random.shuffle(candidates)
     seeds = candidates[:SEED_COUNT_FOR_QUERY]
-    if DEBUG_MODE:
-        logger.info(f"[DEBUG] using {len(seeds)} seeds for the combined similarity query")
 
-    seed_str = " ".join(seeds)
-    predicates = [f"system:similar to {seed_str} with distance {MAX_DISTANCE}",
-        f"system:limit = {pool_size * API_LIMIT_FUZZ}"]
-
-    predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
-
-    try:
-        resp = client.search_files(predicates, return_hashes=True)
-        similar_hashes = list(resp.get("hashes") or [])
-    except Exception as e:
-        logger.error(f"Combined similarity search failed: {e}")
-        return []
-
-    # Dedupe, drop seeds themselves, and cap at pool_size (order preserved).
+    # Escalate distance until we collect enough unique, non-seed files.
     pool: list[str] = []
     seen: set[str] = set(seeds)
-    for h in similar_hashes:
-        if h in seen:
-            continue
-        seen.add(h)
-        pool.append(h)
-        if len(pool) >= pool_size:
+    distance = MAX_DISTANCE_START
+    satisfied = pool_size if MIN_POOL_SATISFIED is None else MIN_POOL_SATISFIED
+
+    while distance <= MAX_DISTANCE_HARD:
+        seed_str = " ".join(seeds)
+        predicates = [f"system:similar to {seed_str} with distance {distance}",
+                      f"system:limit = {pool_size * API_LIMIT_FUZZ}"]
+        logger.info(f"[DEBUG] similarity search at distance {distance}")
+        try:
+            resp = client.search_files(predicates, return_hashes=True)
+            similar_hashes = list(resp.get("hashes") or [])
+        except Exception as e:
+            logger.error(f"Similarity search at distance {distance} failed: {e}")
+            return []
+
+        # Dedupe against seeds + prior results, accumulate, cap at pool_size.
+        for h in similar_hashes:
+            if h in seen:
+                continue
+            seen.add(h)
+            pool.append(h)
+            if len(pool) >= pool_size:
+                break
+
+        if len(pool) >= satisfied:
             break
+
+        logger.info(f"[DEBUG] only {len(pool)}/{satisfied} unique files at distance {distance}; escalating to {distance + DISTANCE_STEP}")
+        distance += DISTANCE_STEP
 
     logger.info(f"Pool assembly complete. Total: {len(pool)} files.")
     return pool
 
 
 def _legacy_seed_predicates() -> list[str]:
-    """Back-compat fallback: read the SEARCH_QUERY file."""
-    try:
-        with open("SEARCH_QUERY", "r", encoding="utf-8") as f:
-            return [l.strip() for l in f if l.strip()]
-    except FileNotFoundError:
-        return []
+    """Back-compat fallback: read the query from the SEARCH_QUERY setting."""
+    return get_list("SEARCH_QUERY", [])
 
 
 def write_choice(file_hash: str, liked: bool, client: hydrus_api.Client | None = None) -> bool:
@@ -212,6 +223,7 @@ def write_choice(file_hash: str, liked: bool, client: hydrus_api.Client | None =
 
 def main() -> None:
     """Standalone entry point (ignored when driven by main.py)."""
+    ensure_config_files()
     query = prompt_for_search()
     pool = build_pool(query=query)
     if not pool:
