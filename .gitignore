@@ -5,6 +5,8 @@
 /ratings.json
 /SEARCH_QUERY
 /comparisons.json
-
-
+/config/KEYS
 /.idea/*
+/config/TAG_FILTERS
+/.claude/*
+/.venv/*
