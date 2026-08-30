@@ -14,7 +14,8 @@ from typing import Tuple, Any, NoReturn
 import hydrus_api  # type: ignore
 from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtGui import Qt
-import matplotlib.pyplot as plt  # type: ignore
+from matplotlib.figure import Figure  # type: ignore
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # type: ignore
 import scipy.stats as stats  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 import numpy as np
@@ -371,12 +372,13 @@ class RatingSystem:
 
 
 class Window(QtWidgets.QWidget):
-    def __init__(self, rating_system: RatingSystem, client: hydrus_api.Client):
+    def __init__(self, rating_system: RatingSystem, client: hydrus_api.Client, graphs_window: "GraphsWindow | None" = None):
         super().__init__()
         self.client = client
         self.left_file_metadata: FileMetaData = {}
         self.right_file_metadata: FileMetaData = {}
         self.rating_system: RatingSystem = rating_system
+        self.graphs_window = graphs_window
         self.go_back_image_pairs_stack: list[Tuple[int, int]] = []
         self.comparisons = 0
         self._last_scaled_pair: tuple[int, int] | None = None
@@ -473,6 +475,14 @@ class Window(QtWidgets.QWidget):
         self.comparison_layout.setCurrentWidget(self.overlay_container)
 
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
+        self.refresh_graphs()
+
+    def refresh_graphs(self) -> None:
+        if self.graphs_window is None:
+            return
+        prediction_entries = load_prediction_entries()
+        top_tags = top_tags_from_rating_system(self.rating_system)
+        self.graphs_window.refresh(prediction_entries, top_tags, figure_height=700)
 
     def set_window_title_based_on_comparison_count(self):
         self.setWindowTitle(f"TagRank - Comparisons done this session: {self.comparisons}")
@@ -545,6 +555,7 @@ class Window(QtWidgets.QWidget):
         self.store_metadata_and_show_images_for_comparison_pair(meta_datas)
         self.comparisons -= 1
         self.set_window_title_based_on_comparison_count()
+        self.refresh_graphs()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         key = event.key()
@@ -578,6 +589,7 @@ class Window(QtWidgets.QWidget):
         self.set_window_title_based_on_comparison_count()
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
+        self.refresh_graphs()
 
     def open_files_externally(self) -> None:
         file_path_right = "file://" + str(self.rating_system.path_from_metadata(self.right_file_metadata).resolve())
@@ -850,178 +862,179 @@ def calculate_tag_count_for_height(available_height_px: int | None = None, min_t
     return max(min_tags, min(max_tags, tag_count))
 
 
-def _create_placeholder_figure(title: str, message: str) -> plt.Figure:
-    """Create an informational placeholder figure for when data is unavailable."""
-    fig, ax = plt.subplots(figsize=(11, 5))
+def _draw_placeholder(fig: Figure, title: str, message: str) -> None:
+    """Populate `fig` with an informational placeholder for when data is unavailable."""
+    ax = fig.add_subplot(111)
     ax.text(0.5, 0.6, message, ha='center', va='center', fontsize=14, style='italic', color='#666666')
     ax.set_title(title, fontsize=12, fontweight='bold')
     ax.axis('off')
     fig.tight_layout()
-    return fig
 
 
-def build_session_summary_figures(
-    prediction_entries: list[dict[str, Any]],
-    top_tags: list[tuple[str, Rating]],
-    *,
-    figure_height: int = 700,
-) -> list[plt.Figure]:
-    if not isinstance(prediction_entries, list):
-        prediction_entries = []
-    figures: list[plt.Figure] = []
-
-    # Figure 1: Rolling prediction accuracy or placeholder
-    if prediction_entries:
-        tag_correct = []
-        photo_correct = []
-        combo_correct = []
-        running_tag = 0.0
-        running_photo = 0.0
-        running_combined = 0.0
-
-        for index, entry in enumerate(prediction_entries, start=1):
-            tag_is_correct = bool(entry.get("tag_prediction") == entry.get("user_selection"))
-            photo_is_correct = bool(entry.get("photo_prediction") == entry.get("user_selection"))
-            combined = (1.0 if tag_is_correct or photo_is_correct else 0.0)
-            tag_correct.append(tag_is_correct)
-            photo_correct.append(photo_is_correct)
-            combo_correct.append(combined)
-            running_tag += (1.0 if tag_is_correct else 0.0)
-            running_photo += (1.0 if photo_is_correct else 0.0)
-            running_combined += combined
-            tag_accuracy = running_tag / index
-            photo_accuracy = running_photo / index
-            overall_accuracy = running_combined / index
-            tag_correct[index - 1] = tag_accuracy
-            photo_correct[index - 1] = photo_accuracy
-            combo_correct[index - 1] = overall_accuracy
-
-        fig, axes = plt.subplots(figsize=(11, 5))
-        x_values = list(range(1, len(prediction_entries) + 1))
-        axes.plot(x_values, tag_correct, label="Tag model", color="#4C78A8", linewidth=2.0, marker='o', markersize=3, alpha=0.7)
-        axes.plot(x_values, photo_correct, label="Photo model", color="#F58518", linewidth=2.0, marker='s', markersize=3, alpha=0.7)
-        axes.plot(x_values, combo_correct, label="Combined prediction", color="#54A24B", linewidth=2.5, marker='^', markersize=4, alpha=0.8)
-        axes.set_title("Rolling Prediction Accuracy Over Time", fontsize=12, fontweight='bold')
-        axes.set_xlabel("Comparison Number", fontsize=10)
-        axes.set_ylabel("Cumulative Accuracy", fontsize=10)
-        axes.set_ylim(-0.05, 1.1)
-        axes.grid(True, alpha=0.2, linestyle='--')
-        axes.legend(loc='lower right', fontsize=9)
-        fig.tight_layout()
-        figures.append(fig)
-    else:
-        fig = _create_placeholder_figure(
+def draw_accuracy_figure(fig: Figure, prediction_entries: list[dict[str, Any]]) -> None:
+    """Rolling prediction accuracy over time, or a placeholder when there is no data."""
+    fig.clear()
+    if not prediction_entries:
+        _draw_placeholder(
+            fig,
             "Rolling Prediction Accuracy Over Time",
             "No prediction data yet.\nComplete a ranking session to see accuracy trends."
         )
-        figures.append(fig)
+        return
 
-    # Figure 2: Ratings per date or placeholder
-    # Figure 2: Ratings per date or placeholder
-    if prediction_entries:
-        date_counter: dict[str, int] = {}
-        for entry in prediction_entries:
-            date_value = str(entry.get("date") or "unknown")
-            date_counter[date_value] = date_counter.get(date_value, 0) + 1
-        dates = list(date_counter.keys())
-        counts = [date_counter[date] for date in dates]
+    tag_correct = []
+    photo_correct = []
+    combo_correct = []
+    running_tag = 0.0
+    running_photo = 0.0
+    running_combined = 0.0
 
-        fig, ax = plt.subplots(figsize=(11, 5))
-        bars = ax.bar(dates, counts, color="#72B7B2", edgecolor="#4A8A84", linewidth=1.5)
-        ax.set_title("Ratings per Session Date", fontsize=12, fontweight='bold')
-        ax.set_xlabel("Date", fontsize=10)
-        ax.set_ylabel("Number of Comparisons", fontsize=10)
-        ax.grid(axis="y", alpha=0.2, linestyle='--')
+    for index, entry in enumerate(prediction_entries, start=1):
+        tag_is_correct = bool(entry.get("tag_prediction") == entry.get("user_selection"))
+        photo_is_correct = bool(entry.get("photo_prediction") == entry.get("user_selection"))
+        combined = (1.0 if tag_is_correct or photo_is_correct else 0.0)
+        tag_correct.append(tag_is_correct)
+        photo_correct.append(photo_is_correct)
+        combo_correct.append(combined)
+        running_tag += (1.0 if tag_is_correct else 0.0)
+        running_photo += (1.0 if photo_is_correct else 0.0)
+        running_combined += combined
+        tag_accuracy = running_tag / index
+        photo_accuracy = running_photo / index
+        overall_accuracy = running_combined / index
+        tag_correct[index - 1] = tag_accuracy
+        photo_correct[index - 1] = photo_accuracy
+        combo_correct[index - 1] = overall_accuracy
 
-        # Add value labels on bars
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{int(height)}',
-                   ha='center', va='bottom', fontsize=8)
+    axes = fig.add_subplot(111)
+    x_values = list(range(1, len(prediction_entries) + 1))
+    axes.plot(x_values, tag_correct, label="Tag model", color="#4C78A8", linewidth=2.0, marker='o', markersize=3, alpha=0.7)
+    axes.plot(x_values, photo_correct, label="Photo model", color="#F58518", linewidth=2.0, marker='s', markersize=3, alpha=0.7)
+    axes.plot(x_values, combo_correct, label="Combined prediction", color="#54A24B", linewidth=2.5, marker='^', markersize=4, alpha=0.8)
+    axes.set_title("Rolling Prediction Accuracy Over Time", fontsize=12, fontweight='bold')
+    axes.set_xlabel("Comparison Number", fontsize=10)
+    axes.set_ylabel("Cumulative Accuracy", fontsize=10)
+    axes.set_ylim(-0.05, 1.1)
+    axes.grid(True, alpha=0.2, linestyle='--')
+    axes.legend(loc='lower right', fontsize=9)
+    fig.tight_layout()
 
-        fig.autofmt_xdate(rotation=45, ha='right')
-        fig.tight_layout()
-        figures.append(fig)
-    else:
-        fig = _create_placeholder_figure(
+
+def draw_dates_figure(fig: Figure, prediction_entries: list[dict[str, Any]]) -> None:
+    """Ratings per session date, or a placeholder when there is no data."""
+    fig.clear()
+    if not prediction_entries:
+        _draw_placeholder(
+            fig,
             "Ratings per Session Date",
             "No prediction data yet.\nComplete a ranking session to see activity by date."
         )
-        figures.append(fig)
+        return
 
-    # Figure 3: Confidence calibration or placeholder
-    # Figure 3: Confidence calibration or placeholder
-    if prediction_entries:
-        bins = np.linspace(0, 1, 11)
-        calibration_values = []
-        calibration_labels = []
-        sample_counts = []
+    date_counter: dict[str, int] = {}
+    for entry in prediction_entries:
+        date_value = str(entry.get("date") or "unknown")
+        date_counter[date_value] = date_counter.get(date_value, 0) + 1
+    dates = list(date_counter.keys())
+    counts = [date_counter[date] for date in dates]
 
-        for start, end in zip(bins[:-1], bins[1:]):
-            bucket = [entry for entry in prediction_entries if start <= float(entry.get("confidence", 0.0)) < end]
-            if not bucket:
-                accuracy = 0.0
-                sample_counts.append(0)
-            else:
-                correctness = [1.0 if entry.get("tag_prediction") == entry.get("user_selection") else 0.0 for entry in bucket]
-                accuracy = float(sum(correctness) / len(correctness))
-                sample_counts.append(len(bucket))
+    ax = fig.add_subplot(111)
+    bars = ax.bar(dates, counts, color="#72B7B2", edgecolor="#4A8A84", linewidth=1.5)
+    ax.set_title("Ratings per Session Date", fontsize=12, fontweight='bold')
+    ax.set_xlabel("Date", fontsize=10)
+    ax.set_ylabel("Number of Comparisons", fontsize=10)
+    ax.grid(axis="y", alpha=0.2, linestyle='--')
 
-            calibration_values.append(accuracy)
-            calibration_labels.append(f"{start:.1f}–{end:.1f}")
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{int(height)}',
+               ha='center', va='bottom', fontsize=8)
 
-        if len(calibration_values) > 0 and sum(sample_counts) > 0:
-            fig, ax = plt.subplots(figsize=(11, 5))
-            colors = ["#E45756" if v > 0 else "#CCCCCC" for v in calibration_values]
-            bars = ax.bar(calibration_labels, calibration_values, color=colors, edgecolor="#A83339", linewidth=1.2)
+    fig.autofmt_xdate(rotation=45, ha='right')
+    fig.tight_layout()
 
-            # Reference line for perfect calibration
-            ax.axhline(0.5, color="black", linestyle="--", linewidth=1.5, alpha=0.6, label="Perfect calibration")
 
-            ax.set_title("Tag Model Confidence Calibration", fontsize=12, fontweight='bold')
-            ax.set_xlabel("Confidence Bin", fontsize=10)
-            ax.set_ylabel("Observed Correctness", fontsize=10)
-            ax.set_ylim(-0.05, 1.1)
-            ax.grid(axis="y", alpha=0.2, linestyle='--')
-            ax.legend(loc='upper left', fontsize=9)
-
-            # Add sample count labels on bars
-            for bar, count in zip(bars, sample_counts):
-                if count > 0:
-                    height = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                           f'n={count}',
-                           ha='center', va='bottom', fontsize=8, style='italic')
-
-            fig.tight_layout()
-            figures.append(fig)
-        else:
-            fig = _create_placeholder_figure(
-                "Tag Model Confidence Calibration",
-                "No prediction data yet.\nComplete a ranking session to see calibration analysis."
-            )
-            figures.append(fig)
-    else:
-        fig = _create_placeholder_figure(
+def draw_calibration_figure(fig: Figure, prediction_entries: list[dict[str, Any]]) -> None:
+    """Tag model confidence calibration, or a placeholder when there is no data."""
+    fig.clear()
+    if not prediction_entries:
+        _draw_placeholder(
+            fig,
             "Tag Model Confidence Calibration",
             "No prediction data yet.\nComplete a ranking session to see calibration analysis."
         )
-        figures.append(fig)
+        return
 
+    bins = np.linspace(0, 1, 11)
+    calibration_values = []
+    calibration_labels = []
+    sample_counts = []
+
+    for start, end in zip(bins[:-1], bins[1:]):
+        bucket = [entry for entry in prediction_entries if start <= float(entry.get("confidence", 0.0)) < end]
+        if not bucket:
+            accuracy = 0.0
+            sample_counts.append(0)
+        else:
+            correctness = [1.0 if entry.get("tag_prediction") == entry.get("user_selection") else 0.0 for entry in bucket]
+            accuracy = float(sum(correctness) / len(correctness))
+            sample_counts.append(len(bucket))
+
+        calibration_values.append(accuracy)
+        calibration_labels.append(f"{start:.1f}–{end:.1f}")
+
+    if len(calibration_values) == 0 or sum(sample_counts) == 0:
+        _draw_placeholder(
+            fig,
+            "Tag Model Confidence Calibration",
+            "No prediction data yet.\nComplete a ranking session to see calibration analysis."
+        )
+        return
+
+    ax = fig.add_subplot(111)
+    colors = ["#E45756" if v > 0 else "#CCCCCC" for v in calibration_values]
+    bars = ax.bar(calibration_labels, calibration_values, color=colors, edgecolor="#A83339", linewidth=1.2)
+
+    ax.axhline(0.5, color="black", linestyle="--", linewidth=1.5, alpha=0.6, label="Perfect calibration")
+
+    ax.set_title("Tag Model Confidence Calibration", fontsize=12, fontweight='bold')
+    ax.set_xlabel("Confidence Bin", fontsize=10)
+    ax.set_ylabel("Observed Correctness", fontsize=10)
+    ax.set_ylim(-0.05, 1.1)
+    ax.grid(axis="y", alpha=0.2, linestyle='--')
+    ax.legend(loc='upper left', fontsize=9)
+
+    for bar, count in zip(bars, sample_counts):
+        if count > 0:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                   f'n={count}',
+                   ha='center', va='bottom', fontsize=8, style='italic')
+
+    fig.tight_layout()
+
+
+def draw_tag_rankings_figure(
+    fig: Figure,
+    top_tags: list[tuple[str, Rating]],
+    *,
+    figure_height: int = 700,
+) -> None:
+    """Final tag rankings by TrueSkill score."""
+    fig.clear()
     ranked_tags = sorted(top_tags, key=lambda tag_rating: trueskill_number_from_rating(tag_rating[1]), reverse=True)
     visible_count = calculate_tag_count_for_height(figure_height)
     available_tags = ranked_tags[:visible_count]
     total_ranked_tags = len(ranked_tags)
 
-    fig, ax = plt.subplots(figsize=(10, max(5.0, 0.35 * len(available_tags) + 1.5)))
+    ax = fig.add_subplot(111)
     labels = [tag for tag, _ in available_tags]
     scores = [trueskill_number_from_rating(rating) for _, rating in available_tags]
 
     bars = ax.barh(labels[::-1], scores[::-1], color="#B279A2", edgecolor="#7D4F77", linewidth=1.2)
     ax.invert_yaxis()
 
-    # Add score labels on bars
     for i, (bar, score) in enumerate(zip(bars, scores[::-1])):
         ax.text(score + 0.3, bar.get_y() + bar.get_height()/2.,
                f'{score:.1f}',
@@ -1035,9 +1048,51 @@ def build_session_summary_figures(
     ax.set_xlim(0, max(scores) * 1.15 if scores else 10)
 
     fig.tight_layout()
-    figures.append(fig)
 
-    return figures
+
+def load_prediction_entries() -> list[dict[str, Any]]:
+    prediction_log_path = Path("./prediction_log.json")
+    if not prediction_log_path.exists():
+        return []
+    try:
+        with open(prediction_log_path, "r", encoding="utf-8") as f:
+            raw_entries = json.loads(f.read() or "[]")
+        if isinstance(raw_entries, list):
+            return [entry for entry in raw_entries if isinstance(entry, dict)]
+    except (JSONDecodeError, ValueError):
+        pass
+    return []
+
+
+def top_tags_from_rating_system(rating_system: "RatingSystem") -> list[Tuple[str, Rating]]:
+    return sorted(rating_system.current_ratings.items(),
+                  key=lambda x: trueskill_number_from_rating(x[1]),
+                  reverse=True)[:max(10, AMOUNT_OF_TAGS_IN_CHARTS)]
+
+
+class GraphsWindow(QtWidgets.QWidget):
+    """A single companion window holding all session graphs, refreshed live as ratings change."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("TagRank - Session Graphs")
+        self.figures = [Figure(figsize=(11, 5)) for _ in range(4)]
+        self.canvases = [FigureCanvasQTAgg(fig) for fig in self.figures]
+
+        layout = QtWidgets.QGridLayout(self)
+        layout.addWidget(self.canvases[0], 0, 0)
+        layout.addWidget(self.canvases[1], 0, 1)
+        layout.addWidget(self.canvases[2], 1, 0)
+        layout.addWidget(self.canvases[3], 1, 1)
+        self.resize(1200, 800)
+
+    def refresh(self, prediction_entries: list[dict[str, Any]], top_tags: list[Tuple[str, Rating]], *, figure_height: int = 700) -> None:
+        draw_accuracy_figure(self.figures[0], prediction_entries)
+        draw_dates_figure(self.figures[1], prediction_entries)
+        draw_calibration_figure(self.figures[2], prediction_entries)
+        draw_tag_rankings_figure(self.figures[3], top_tags, figure_height=figure_height)
+        for canvas in self.canvases:
+            canvas.draw_idle()
 
 
 def run_for_rank_tags(client) -> None:
@@ -1063,38 +1118,27 @@ def run_for_rank_tags(client) -> None:
 
     app = QtWidgets.QApplication(sys.argv)
     rating_system = RatingSystem(client, ids)
-    window: QtWidgets.QWidget = Window(rating_system, client)
+    graphs_window = GraphsWindow()
+    window: Window = Window(rating_system, client, graphs_window=graphs_window)
 
     window.show()
+    graphs_window.show()
+    window_geometry = window.frameGeometry()
+    graphs_window.move(window_geometry.right() + 8, window_geometry.top())
+
     first_section_result = app.exec()
     if first_section_result != 0:
         print("Comparison app closed in error. Not moving on to comparisons.")
         sys.exit(first_section_result)
     window.destroy()
+    graphs_window.destroy()
 
-    many_tags: list[Tuple[str, Rating]] = sorted(rating_system.current_ratings.items(),
-                                                 key=lambda x: trueskill_number_from_rating(x[1]),
-                                                 reverse=True)[:max(10, AMOUNT_OF_TAGS_IN_CHARTS)]
+    many_tags: list[Tuple[str, Rating]] = top_tags_from_rating_system(rating_system)
 
     largest_mu_width = len(str(math.floor(trueskill_number_from_rating(many_tags[0][1]))))
     print("The window that shows the scores can be hard to read. So here the data in text for 10 tags:")
     for (tag, rating) in many_tags:
         print(f"{trueskill_number_from_rating(rating):.1f}".rjust(largest_mu_width + 3) + f": {tag}")
-
-    prediction_log_path = Path("./prediction_log.json")
-    prediction_entries: list[dict[str, Any]] = []
-    if prediction_log_path.exists():
-        try:
-            with open(prediction_log_path, "r", encoding="utf-8") as f:
-                raw_entries = json.loads(f.read() or "[]")
-            if isinstance(raw_entries, list):
-                prediction_entries = [entry for entry in raw_entries if isinstance(entry, dict)]
-        except (JSONDecodeError, ValueError):
-            prediction_entries = []
-
-    figures = build_session_summary_figures(prediction_entries, many_tags, figure_height=700)
-    for figure in figures:
-        plt.show()
 
 
 def sort_files_by_mmr(
