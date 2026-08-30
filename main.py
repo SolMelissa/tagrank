@@ -600,12 +600,12 @@ def run_for_rank_tags(client) -> None:
 
     many_tags: list[Tuple[str, Rating]] = sorted(rating_system.current_ratings.items(),
                                                  key=lambda x: trueskill_number_from_rating(x[1]),
-                                                 reverse=True)[:max(100, AMOUNT_OF_TAGS_IN_CHARTS)]
+                                                 reverse=True)[:max(10, AMOUNT_OF_TAGS_IN_CHARTS)]
 
     largest_mu_width = len(str(math.floor(trueskill_number_from_rating(many_tags[0][1]))))
-    print("The window that shows the scores can be hard to read. So here the data in text for 100 tags:")
+    print("The window that shows the scores can be hard to read. So here the data in text for 10 tags:")
     for (tag, rating) in many_tags:
-        print(f"{trueskill_number_from_rating(rating):.3f}".rjust(largest_mu_width + 3) + f": {tag}")
+        print(f"{trueskill_number_from_rating(rating):.1f}".rjust(largest_mu_width + 3) + f": {tag}")
 
     best_tags: list[Tuple[str, Rating]] = many_tags[:AMOUNT_OF_TAGS_IN_CHARTS]
     for (tag, rating) in best_tags:

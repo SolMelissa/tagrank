@@ -236,20 +236,27 @@ def build_pool(client: hydrus_api.Client | None = None,
             percent = min(max(threshold, 0.0), 100.0) / 100.0
         satisfied = max(1, int(pool_size * percent))
 
-    hard_stop_distance = MAX_DISTANCE_HARD * 2
-    next_seed_distance = MAX_DISTANCE_START
+    hard_stop_start_distance = MAX_DISTANCE_HARD * 2
     for seed_index, seed in enumerate(seeds):
         if len(pool) >= pool_size:
             break
 
-        if next_seed_distance > hard_stop_distance:
-            logger.info(f"Reached hard stop distance {hard_stop_distance}; stopping pool expansion.")
+        start_distance = MAX_DISTANCE_START + (seed_index * DISTANCE_STEP)
+        max_distance_for_seed = MAX_DISTANCE_HARD + (seed_index * DISTANCE_STEP)
+        if start_distance > hard_stop_start_distance:
+            logger.info(
+                f"Reached hard stop start distance {hard_stop_start_distance}; "
+                f"stopping pool expansion after seed {seed_index + 1}/{len(seeds)}."
+            )
             break
 
-        distance = next_seed_distance
-        logger.info(f"Starting seed {seed_index + 1}/{len(seeds)} at distance {distance}: {seed[:12]}...")
+        distance = start_distance
+        logger.info(
+            f"Starting seed {seed_index + 1}/{len(seeds)} at distance {distance} "
+            f"(search range: {distance}..{max_distance_for_seed}): {seed[:12]}..."
+        )
 
-        while distance <= MAX_DISTANCE_HARD:
+        while distance <= max_distance_for_seed:
             if len(pool) >= pool_size:
                 break
 
@@ -289,13 +296,8 @@ def build_pool(client: hydrus_api.Client | None = None,
 
         logger.info(
             f"Seed {seed[:12]}... exhausted at distance {distance}; "
-            f"rotating to next seed starting at {next_seed_distance + DISTANCE_STEP}."
+            f"next seed starts at {MAX_DISTANCE_START + ((seed_index + 1) * DISTANCE_STEP)}."
         )
-        next_seed_distance += DISTANCE_STEP
-
-        if next_seed_distance > hard_stop_distance:
-            logger.info(f"Seed rotation exceeded the hard stop distance {hard_stop_distance}; stopping pool expansion.")
-            break
 
     logger.info(f"Pool assembly complete. Total: {len(pool)} files.")
     return pool[:pool_size]
@@ -307,15 +309,10 @@ def _legacy_seed_predicates() -> list[str]:
 
 
 def write_choice(file_hash: str, liked: bool, client: hydrus_api.Client | None = None) -> bool:
-    """Persist a like/dislike decision to Hydrus."""
+    """Persist a like/dislike decision to Hydrus using the supported client API."""
     client = client or _get_default_client()
     try:
-        resp = client.request("POST", "/edit_ratings/set_rating", json={
-            "service_key": RATING_SERVICE_KEY,
-            "hashes": [file_hash],
-            "rating": "increment" if liked else "decrement",
-        })
-        resp.raise_for_status()
+        client.set_rating(RATING_SERVICE_KEY, liked, hashes=[file_hash])
         return True
     except Exception as e:
         logger.error(f"Failed to write rating for {file_hash}: {e}")
