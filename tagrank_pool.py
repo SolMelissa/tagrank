@@ -79,8 +79,7 @@ def load_ratings() -> dict[str, tuple[float, float]]:
         with open(Path("./ratings.json"), "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        if DEBUG_MODE:
-            logger.warning(f"[DEBUG] Could not load ratings.json: {e}")
+        logger.warning(f"Could not load ratings.json: {e}")
         return {}
     ratings: dict[str, tuple[float, float]] = {}
     for entry in data:
@@ -197,13 +196,10 @@ def prompt_for_search() -> list[str]:
 def get_candidate_seeds(query: list[str], n: int, client: hydrus_api.Client) -> list[str]:
     """One-shot fetch of up to `n` candidate hashes matching `query`."""
     final_query = query + [f"system:limit = {n}"]
-    if DEBUG_MODE:
-        logger.info(f"[DEBUG] candidate seed query: {final_query}")
     try:
         resp = client.search_files(final_query, return_hashes=True)
         hashes = list(resp.get("hashes") or [])
-        if DEBUG_MODE:
-            logger.info(f"[DEBUG] candidate seed search returned {len(hashes)} hashes")
+        logger.info(f"Fetched {len(hashes)} candidate seeds.")
         return hashes
     except Exception as e:
         logger.error(f"Seed search failed: {e}")
@@ -217,7 +213,7 @@ def build_pool(client: hydrus_api.Client | None = None,
     if query is None:
         query = _legacy_seed_predicates()
 
-    logger.info(f"Building pool of {pool_size} files (Distance: start {MAX_DISTANCE_START}, step {DISTANCE_STEP})...")
+    logger.info(f"🔍 Building pool of {pool_size} files (starting distance: {MAX_DISTANCE_START}, max: {MAX_DISTANCE_HARD})...")
 
     candidates = get_candidate_seeds(query, CANDIDATE_SEED_COUNT, client)
     if not candidates:
@@ -226,45 +222,83 @@ def build_pool(client: hydrus_api.Client | None = None,
 
     random.shuffle(candidates)
     seeds = candidates[:SEED_COUNT_FOR_QUERY]
+    logger.info(f"Using {len(seeds)} seed hashes for similarity search.")
 
-    # Escalate distance until we collect enough unique, non-seed files.
     pool: list[str] = []
-    seen: set[str] = set(seeds)
-    distance = MAX_DISTANCE_START
-    satisfied = pool_size if MIN_POOL_SATISFIED is None else MIN_POOL_SATISFIED
+    seen: set[str] = set()
+    if MIN_POOL_SATISFIED is None:
+        satisfied = pool_size
+    else:
+        threshold = float(MIN_POOL_SATISFIED)
+        if 0.0 <= threshold <= 1.0:
+            percent = threshold
+        else:
+            percent = min(max(threshold, 0.0), 100.0) / 100.0
+        satisfied = max(1, int(pool_size * percent))
 
-    while distance <= MAX_DISTANCE_HARD:
-        predicates = list(query)
-        predicates.extend(
-            f"system:similar to {seed} with distance {distance}"
-            for seed in seeds
-        )
-        predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
-        logger.info(f"[DEBUG] similarity search at distance {distance}: {predicates}")
-        try:
-            resp = client.search_files(predicates, return_hashes=True)
-            similar_hashes = list(resp.get("hashes") or [])
-        except Exception as e:
-            logger.error(f"Similarity search at distance {distance} failed: {e}")
-            return []
+    hard_stop_distance = MAX_DISTANCE_HARD * 2
+    next_seed_distance = MAX_DISTANCE_START
+    for seed_index, seed in enumerate(seeds):
+        if len(pool) >= pool_size:
+            break
 
-        # Dedupe against seeds + prior results, accumulate, cap at pool_size.
-        for h in similar_hashes:
-            if h in seen:
-                continue
-            seen.add(h)
-            pool.append(h)
+        if next_seed_distance > hard_stop_distance:
+            logger.info(f"Reached hard stop distance {hard_stop_distance}; stopping pool expansion.")
+            break
+
+        distance = next_seed_distance
+        logger.info(f"Starting seed {seed_index + 1}/{len(seeds)} at distance {distance}: {seed[:12]}...")
+
+        while distance <= MAX_DISTANCE_HARD:
             if len(pool) >= pool_size:
                 break
+
+            predicates = list(query)
+            predicates.append(f"system:similar to {seed} with distance {distance}")
+            predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
+            logger.info(f"Searching at distance {distance} for seed {seed[:12]}...")
+            try:
+                resp = client.search_files(predicates, return_hashes=True)
+                similar_hashes = list(resp.get("hashes") or [])
+            except Exception as e:
+                logger.error(f"Similarity search at distance {distance} failed: {e}")
+                return []
+
+            added_this_round = 0
+            for h in similar_hashes:
+                if h == seed or h in seen:
+                    continue
+                seen.add(h)
+                pool.append(h)
+                added_this_round += 1
+                if len(pool) >= pool_size:
+                    break
+
+            if len(pool) >= satisfied:
+                logger.info(f"Pool satisfied at {len(pool)} files; stopping.")
+                break
+
+            logger.info(
+                f"  Seed {seed[:12]}... collected {added_this_round} new files at distance {distance} "
+                f"(total: {len(pool)}/{satisfied}) → escalating to {distance + DISTANCE_STEP}"
+            )
+            distance += DISTANCE_STEP
 
         if len(pool) >= satisfied:
             break
 
-        logger.info(f"[DEBUG] only {len(pool)}/{satisfied} unique files at distance {distance}; escalating to {distance + DISTANCE_STEP}")
-        distance += DISTANCE_STEP
+        logger.info(
+            f"Seed {seed[:12]}... exhausted at distance {distance}; "
+            f"rotating to next seed starting at {next_seed_distance + DISTANCE_STEP}."
+        )
+        next_seed_distance += DISTANCE_STEP
+
+        if next_seed_distance > hard_stop_distance:
+            logger.info(f"Seed rotation exceeded the hard stop distance {hard_stop_distance}; stopping pool expansion.")
+            break
 
     logger.info(f"Pool assembly complete. Total: {len(pool)} files.")
-    return pool
+    return pool[:pool_size]
 
 
 def _legacy_seed_predicates() -> list[str]:

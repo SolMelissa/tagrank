@@ -157,14 +157,14 @@ DEFAULT_FILE_QUERY = system:number of tags > 5, system:filetype = image, system:
 # ====================== POOL ASSEMBLY ======================
 POOL_SIZE = 100            # final comparison pool size
 CANDIDATE_SEED_COUNT = 10000   # diverse candidates fetched once
-SEED_COUNT_FOR_QUERY = 10      # how many seeds fold into the combined query
+SEED_COUNT_FOR_QUERY = 10      # how many seeds to rotate through when expanding the pool
 API_LIMIT_FUZZ = 2             # over-fetch multiplier to survive dedup
 
 # ====================== DISTANCE ESCALATION ======================
 MAX_DISTANCE_START = 10    # escalating floor; grows by DISTANCE_STEP below
 DISTANCE_STEP = 2          # escalation step per retry
 MAX_DISTANCE_HARD = 64     # hard ceiling: full Hamming range of a 64-bit phash
-MIN_POOL_SATISFIED =       # empty = None (treat e.g. 60% of pool_size as "enough")
+MIN_POOL_SATISFIED =       # percentage of pool_size to consider "enough"; 100 = 100%, 50 = 50%, 0.5 = 50%
 
 # ====================== UI / MISC ======================
 TOP_TAG_OPTIONS = 20       # how many "most liked" tags to offer
