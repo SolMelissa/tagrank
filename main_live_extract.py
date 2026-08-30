@@ -15,6 +15,7 @@ import hydrus_api  # type: ignore
 from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtGui import Qt
 import matplotlib.pyplot as plt  # type: ignore
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # type: ignore
 import scipy.stats as stats  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 import numpy as np
@@ -372,12 +373,13 @@ class RatingSystem:
 
 
 class Window(QtWidgets.QWidget):
-    def __init__(self, rating_system: RatingSystem, client: hydrus_api.Client):
+    def __init__(self, rating_system: RatingSystem, client: hydrus_api.Client, dashboard: "SummaryDashboard | None" = None):
         super().__init__()
         self.client = client
         self.left_file_metadata: FileMetaData = {}
         self.right_file_metadata: FileMetaData = {}
         self.rating_system: RatingSystem = rating_system
+        self.dashboard = dashboard
         self.go_back_image_pairs_stack: list[Tuple[int, int]] = []
         self.comparisons = 0
         self._last_scaled_pair: tuple[int, int] | None = None
@@ -546,6 +548,8 @@ class Window(QtWidgets.QWidget):
         self.store_metadata_and_show_images_for_comparison_pair(meta_datas)
         self.comparisons -= 1
         self.set_window_title_based_on_comparison_count()
+        if self.dashboard is not None:
+            self.dashboard.refresh()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         key = event.key()
@@ -579,6 +583,8 @@ class Window(QtWidgets.QWidget):
         self.set_window_title_based_on_comparison_count()
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
+        if self.dashboard is not None:
+            self.dashboard.refresh()
 
     def open_files_externally(self) -> None:
         file_path_right = "file://" + str(self.rating_system.path_from_metadata(self.right_file_metadata).resolve())
@@ -600,6 +606,60 @@ class Window(QtWidgets.QWidget):
     def prepare_to_quit(self):
         print("Saving results to file...")
         self.rating_system.write_results_to_file()
+
+
+class SummaryDashboard(QtWidgets.QWidget):
+    """Companion window that shows all session summary graphs together in one 2x2 grid, updated live."""
+
+    def __init__(self, rating_system: RatingSystem, amount_of_tags: int):
+        super().__init__()
+        self.rating_system = rating_system
+        self.amount_of_tags = amount_of_tags
+        self.prediction_log_path = Path("./prediction_log.json")
+        self.setWindowTitle("TagRank - Session Summary")
+        self.resize(1100, 800)
+
+        self.grid_layout = QtWidgets.QGridLayout(self)
+        self.grid_layout.setContentsMargins(4, 4, 4, 4)
+        self.grid_layout.setSpacing(4)
+        self.canvases: list[FigureCanvasQTAgg] = []
+
+        self.refresh()
+
+    def _load_prediction_entries(self) -> list[dict[str, Any]]:
+        if not self.prediction_log_path.exists():
+            return []
+        try:
+            with open(self.prediction_log_path, "r", encoding="utf-8") as f:
+                raw_entries = json.loads(f.read() or "[]")
+            if isinstance(raw_entries, list):
+                return [entry for entry in raw_entries if isinstance(entry, dict)]
+        except (JSONDecodeError, ValueError):
+            pass
+        return []
+
+    def refresh(self) -> None:
+        prediction_entries = self._load_prediction_entries()
+        many_tags: list[Tuple[str, Rating]] = sorted(
+            self.rating_system.current_ratings.items(),
+            key=lambda x: trueskill_number_from_rating(x[1]),
+            reverse=True,
+        )[:max(10, self.amount_of_tags)]
+
+        figures = build_session_summary_figures(prediction_entries, many_tags, figure_height=350)
+
+        old_canvases = self.canvases
+        self.canvases = []
+        for index, figure in enumerate(figures):
+            canvas = FigureCanvasQTAgg(figure)
+            self.grid_layout.addWidget(canvas, index // 2, index % 2)
+            self.canvases.append(canvas)
+
+        for old_canvas in old_canvases:
+            self.grid_layout.removeWidget(old_canvas)
+            old_figure = old_canvas.figure
+            old_canvas.setParent(None)
+            plt.close(old_figure)
 
 
 def print_could_not_read_comparisons_file_help() -> None:
@@ -907,7 +967,6 @@ def build_session_summary_figures(
         figures.append(fig)
 
     # Figure 2: Ratings per date or placeholder
-    # Figure 2: Ratings per date or placeholder
     if prediction_entries:
         date_counter: dict[str, int] = {}
         for entry in prediction_entries:
@@ -922,14 +981,14 @@ def build_session_summary_figures(
         ax.set_xlabel("Date", fontsize=10)
         ax.set_ylabel("Number of Comparisons", fontsize=10)
         ax.grid(axis="y", alpha=0.2, linestyle='--')
-        
+
         # Add value labels on bars
         for bar in bars:
             height = bar.get_height()
             ax.text(bar.get_x() + bar.get_width()/2., height,
                    f'{int(height)}',
                    ha='center', va='bottom', fontsize=8)
-        
+
         fig.autofmt_xdate(rotation=45, ha='right')
         fig.tight_layout()
         figures.append(fig)
@@ -941,13 +1000,12 @@ def build_session_summary_figures(
         figures.append(fig)
 
     # Figure 3: Confidence calibration or placeholder
-    # Figure 3: Confidence calibration or placeholder
     if prediction_entries:
         bins = np.linspace(0, 1, 11)
         calibration_values = []
         calibration_labels = []
         sample_counts = []
-        
+
         for start, end in zip(bins[:-1], bins[1:]):
             bucket = [entry for entry in prediction_entries if start <= float(entry.get("confidence", 0.0)) < end]
             if not bucket:
@@ -957,25 +1015,25 @@ def build_session_summary_figures(
                 correctness = [1.0 if entry.get("tag_prediction") == entry.get("user_selection") else 0.0 for entry in bucket]
                 accuracy = float(sum(correctness) / len(correctness))
                 sample_counts.append(len(bucket))
-            
+
             calibration_values.append(accuracy)
             calibration_labels.append(f"{start:.1f}–{end:.1f}")
-        
+
         if len(calibration_values) > 0 and sum(sample_counts) > 0:
             fig, ax = plt.subplots(figsize=(11, 5))
             colors = ["#E45756" if v > 0 else "#CCCCCC" for v in calibration_values]
             bars = ax.bar(calibration_labels, calibration_values, color=colors, edgecolor="#A83339", linewidth=1.2)
-            
+
             # Reference line for perfect calibration
             ax.axhline(0.5, color="black", linestyle="--", linewidth=1.5, alpha=0.6, label="Perfect calibration")
-            
+
             ax.set_title("Tag Model Confidence Calibration", fontsize=12, fontweight='bold')
             ax.set_xlabel("Confidence Bin", fontsize=10)
             ax.set_ylabel("Observed Correctness", fontsize=10)
             ax.set_ylim(-0.05, 1.1)
             ax.grid(axis="y", alpha=0.2, linestyle='--')
             ax.legend(loc='upper left', fontsize=9)
-            
+
             # Add sample count labels on bars
             for bar, count in zip(bars, sample_counts):
                 if count > 0:
@@ -983,7 +1041,7 @@ def build_session_summary_figures(
                     ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
                            f'n={count}',
                            ha='center', va='bottom', fontsize=8, style='italic')
-            
+
             fig.tight_layout()
             figures.append(fig)
         else:
@@ -1007,23 +1065,23 @@ def build_session_summary_figures(
     fig, ax = plt.subplots(figsize=(10, max(5.0, 0.35 * len(available_tags) + 1.5)))
     labels = [tag for tag, _ in available_tags]
     scores = [trueskill_number_from_rating(rating) for _, rating in available_tags]
-    
+
     bars = ax.barh(labels[::-1], scores[::-1], color="#B279A2", edgecolor="#7D4F77", linewidth=1.2)
     ax.invert_yaxis()
-    
+
     # Add score labels on bars
     for i, (bar, score) in enumerate(zip(bars, scores[::-1])):
         ax.text(score + 0.3, bar.get_y() + bar.get_height()/2.,
                f'{score:.1f}',
                ha='left', va='center', fontsize=9, fontweight='bold')
-    
+
     title_suffix = f"(showing {len(labels)} of {total_ranked_tags})" if len(labels) < total_ranked_tags else f"(all {total_ranked_tags})"
     ax.set_title(f"Final Tag Rankings by TrueSkill Score\n{title_suffix}", fontsize=12, fontweight='bold')
     ax.set_xlabel("TrueSkill Score", fontsize=10)
     ax.set_ylabel("Tag", fontsize=10)
     ax.grid(axis="x", alpha=0.2, linestyle='--')
     ax.set_xlim(0, max(scores) * 1.15 if scores else 10)
-    
+
     fig.tight_layout()
     figures.append(fig)
 
@@ -1053,9 +1111,23 @@ def run_for_rank_tags(client) -> None:
 
     app = QtWidgets.QApplication(sys.argv)
     rating_system = RatingSystem(client, ids)
-    window: QtWidgets.QWidget = Window(rating_system, client)
+
+    dashboard = SummaryDashboard(rating_system, AMOUNT_OF_TAGS_IN_CHARTS)
+    window: QtWidgets.QWidget = Window(rating_system, client, dashboard)
 
     window.show()
+    screen_geometry = window.screen().availableGeometry() if window.screen() else None
+    if screen_geometry is not None:
+        window.setGeometry(
+            screen_geometry.x(), screen_geometry.y(),
+            screen_geometry.width() * 3 // 5, screen_geometry.height()
+        )
+        dashboard.setGeometry(
+            screen_geometry.x() + screen_geometry.width() * 3 // 5, screen_geometry.y(),
+            screen_geometry.width() * 2 // 5, screen_geometry.height()
+        )
+    dashboard.show()
+
     first_section_result = app.exec()
     if first_section_result != 0:
         print("Comparison app closed in error. Not moving on to comparisons.")
@@ -1070,21 +1142,6 @@ def run_for_rank_tags(client) -> None:
     print("The window that shows the scores can be hard to read. So here the data in text for 10 tags:")
     for (tag, rating) in many_tags:
         print(f"{trueskill_number_from_rating(rating):.1f}".rjust(largest_mu_width + 3) + f": {tag}")
-
-    prediction_log_path = Path("./prediction_log.json")
-    prediction_entries: list[dict[str, Any]] = []
-    if prediction_log_path.exists():
-        try:
-            with open(prediction_log_path, "r", encoding="utf-8") as f:
-                raw_entries = json.loads(f.read() or "[]")
-            if isinstance(raw_entries, list):
-                prediction_entries = [entry for entry in raw_entries if isinstance(entry, dict)]
-        except (JSONDecodeError, ValueError):
-            prediction_entries = []
-
-    figures = build_session_summary_figures(prediction_entries, many_tags, figure_height=700)
-    for figure in figures:
-        plt.show()
 
 
 def sort_files_by_mmr(
