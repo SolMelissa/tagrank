@@ -115,20 +115,35 @@ class DirectFileRatingTests(unittest.TestCase):
     def test_photo_confidence_is_written_to_the_configured_service_key(self):
         original_keys = config._KEYS
         try:
-            config._KEYS = {"TAGRANK_MMR_CONFIDENCE_SERVICE_KEY": "photo-confidence-key"}
+            config._KEYS = {
+                "TAGRANK_MMR_SERVICE_KEY": "mmr-key",
+                "TAGRANK_MMR_CONFIDENCE_SERVICE_KEY": "photo-confidence-key",
+            }
             client = FakeClient()
             system = RatingSystem(client, [])
-            winner = {
-                **metadata(1, 10),
-                "ratings": {"photo-confidence-key": 10},
-            }
+            winner = {"file_id": 1, "hash": "hash-1", "ratings": {"mmr-key": 10}, "tags": {}}
+            loser = {"file_id": 2, "hash": "hash-2", "ratings": {"mmr-key": 10}, "tags": {}}
 
-            system.write_file_mmr_confidence_rating(winner)
+            system.process_result(winner=winner, loser=loser)
 
-            self.assertEqual(client.writes[-1][0], "photo-confidence-key")
-            self.assertEqual(client.writes[-1][1], 10)
+            confidence_writes = [write for write in client.writes if write[0] == "photo-confidence-key"]
+            score_writes = [write for write in client.writes if write[0] == "mmr-key"]
+            self.assertTrue(confidence_writes)
+            # Confidence is the secondary TrueSkill stat (derived from sigma), not the rating itself.
+            self.assertNotEqual(confidence_writes[-1][1], score_writes[-1][1])
+            self.assertGreater(confidence_writes[-1][1], 0)
         finally:
             config._KEYS = original_keys
+
+    def test_file_confidence_rises_as_comparisons_reduce_uncertainty(self):
+        system = RatingSystem(FakeClient(), [])
+        winner = metadata(1, 10)
+        loser = metadata(2, 10)
+        confidence_before = system.file_confidence(winner)
+
+        system.process_result(winner=winner, loser=loser)
+
+        self.assertGreater(system.file_confidence(winner), confidence_before)
 
     def test_comparison_label_formats_photo_and_tag_mmr(self):
         formatted = format_comparison_label(10.0, 5.0, 7.0, 3.0)

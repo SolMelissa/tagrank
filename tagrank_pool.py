@@ -99,8 +99,19 @@ def trueskill_score(rating: tuple[float, float]) -> float:
     return mu - 3 * sigma
 
 
-def prompt_for_search() -> list[str]:
+def get_tag_file_count(tag: str, client: hydrus_api.Client) -> int:
+    """Number of files in the Hydrus db currently carrying `tag`."""
+    try:
+        resp = client.search_files([tag], return_hashes=True)
+        return len(resp.get("hashes") or [])
+    except Exception as e:
+        logger.error(f"Could not get file count for tag '{tag}': {e}")
+        return 0
+
+
+def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
     """Offer a numbered list of top/bottom/random liked tags, or custom."""
+    client = client or _get_default_client()
     ratings = load_ratings()
     ranked = sorted(ratings.items(), key=lambda kv: trueskill_score(kv[1]))
 
@@ -139,9 +150,12 @@ def prompt_for_search() -> list[str]:
         for tag in categories[label]:
             ordered_rows.append((label, tag))
 
+    unique_tags = {tag for _, tag in ordered_rows}
+    file_counts = {tag: get_tag_file_count(tag, client) for tag in unique_tags}
+
     # column layout
     max_rows = max(len(categories[k]) for k in ("Top", "Random", "Bottom")) if any(categories.values()) else 0
-    col_width = 32
+    col_width = 40
 
     print(f"  {'Top':<{col_width}} {'Random':<{col_width}} Bottom")
     top_list = list(enumerate(categories["Top"], start=1))
@@ -157,12 +171,13 @@ def prompt_for_search() -> list[str]:
             if row < len(per_label[label]):
                 idx, tag = per_label[label][row]
                 score = trueskill_score(ratings.get(tag, (0.0, 0.0)))
+                count = file_counts.get(tag, 0)
                 parts = tag.split(":", 1)
                 if len(parts) == 2:
                     main, group = parts
-                    display = f"{idx:02d}: [{score:.1f}] {main} ({group})"
+                    display = f"{idx:02d}: [{score:.1f}] {main} ({group}) - {count} files"
                 else:
-                    display = f"{idx:02d}: [{score:.1f}] {tag}"
+                    display = f"{idx:02d}: [{score:.1f}] {tag} - {count} files"
                 cells.append(display)
             else:
                 cells.append("")
@@ -213,7 +228,25 @@ def build_pool(client: hydrus_api.Client | None = None,
     if query is None:
         query = _legacy_seed_predicates()
 
-    logger.info(f"🔍 Building pool of {pool_size} files (starting distance: {MAX_DISTANCE_START}, max: {MAX_DISTANCE_HARD})...")
+    logger.info(f"Building pool of {pool_size} files (starting distance: {MAX_DISTANCE_START}, max: {MAX_DISTANCE_HARD})...")
+
+    # If the starting query is a single plain tag with fewer matching files than the
+    # requested pool size, similarity-search filtering can't add anything - there's
+    # nothing to filter down from. Just use every file that has the tag.
+    if len(query) == 1 and not query[0].startswith("system:"):
+        tag = query[0]
+        available = get_tag_file_count(tag, client)
+        if 0 < available < pool_size:
+            logger.info(
+                f"Tag '{tag}' only has {available} files, fewer than the requested {pool_size}; "
+                f"bypassing similarity filtering and using all {available} files."
+            )
+            try:
+                resp = client.search_files(query, return_hashes=True)
+                return list(resp.get("hashes") or [])
+            except Exception as e:
+                logger.error(f"Bypass search for tag '{tag}' failed: {e}")
+                return []
 
     candidates = get_candidate_seeds(query, CANDIDATE_SEED_COUNT, client)
     if not candidates:
@@ -237,6 +270,16 @@ def build_pool(client: hydrus_api.Client | None = None,
         satisfied = max(1, int(pool_size * percent))
 
     hard_stop_start_distance = MAX_DISTANCE_HARD * 2
+    seeds_used = 0
+
+    def show_progress(seed_index: int, distance: int) -> None:
+        print(
+            f"\r  Assembling pool: seed {seed_index + 1}/{len(seeds)}, "
+            f"distance {distance} — {len(pool)}/{satisfied} files".ljust(78),
+            end="",
+            flush=True,
+        )
+
     for seed_index, seed in enumerate(seeds):
         if len(pool) >= pool_size:
             break
@@ -244,62 +287,50 @@ def build_pool(client: hydrus_api.Client | None = None,
         start_distance = MAX_DISTANCE_START + (seed_index * DISTANCE_STEP)
         max_distance_for_seed = MAX_DISTANCE_HARD + (seed_index * DISTANCE_STEP)
         if start_distance > hard_stop_start_distance:
-            logger.info(
+            logger.debug(
                 f"Reached hard stop start distance {hard_stop_start_distance}; "
                 f"stopping pool expansion after seed {seed_index + 1}/{len(seeds)}."
             )
             break
 
         distance = start_distance
-        logger.info(
-            f"Starting seed {seed_index + 1}/{len(seeds)} at distance {distance} "
-            f"(search range: {distance}..{max_distance_for_seed}): {seed[:12]}..."
-        )
+        seeds_used = seed_index + 1
 
         while distance <= max_distance_for_seed:
             if len(pool) >= pool_size:
                 break
 
+            show_progress(seed_index, distance)
+
             predicates = list(query)
             predicates.append(f"system:similar to {seed} with distance {distance}")
             predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
-            logger.info(f"Searching at distance {distance} for seed {seed[:12]}...")
             try:
                 resp = client.search_files(predicates, return_hashes=True)
                 similar_hashes = list(resp.get("hashes") or [])
             except Exception as e:
+                print()
                 logger.error(f"Similarity search at distance {distance} failed: {e}")
                 return []
 
-            added_this_round = 0
             for h in similar_hashes:
                 if h == seed or h in seen:
                     continue
                 seen.add(h)
                 pool.append(h)
-                added_this_round += 1
                 if len(pool) >= pool_size:
                     break
 
             if len(pool) >= satisfied:
-                logger.info(f"Pool satisfied at {len(pool)} files; stopping.")
                 break
 
-            logger.info(
-                f"  Seed {seed[:12]}... collected {added_this_round} new files at distance {distance} "
-                f"(total: {len(pool)}/{satisfied}) → escalating to {distance + DISTANCE_STEP}"
-            )
             distance += DISTANCE_STEP
 
         if len(pool) >= satisfied:
             break
 
-        logger.info(
-            f"Seed {seed[:12]}... exhausted at distance {distance}; "
-            f"next seed starts at {MAX_DISTANCE_START + ((seed_index + 1) * DISTANCE_STEP)}."
-        )
-
-    logger.info(f"Pool assembly complete. Total: {len(pool)} files.")
+    print()  # end the progress line
+    logger.info(f"Pool assembly complete: {len(pool)} files from {seeds_used} seed(s).")
     return pool[:pool_size]
 
 
