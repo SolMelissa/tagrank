@@ -55,6 +55,7 @@ SEED_COUNT_FOR_QUERY = get_int("SEED_COUNT_FOR_QUERY", 10)
 API_LIMIT_FUZZ       = get_int("API_LIMIT_FUZZ", 2)
 TOP_TAG_OPTIONS      = get_int("TOP_TAG_OPTIONS", 20)
 BOTTOM_TAG_OPTIONS   = get_int("BOTTOM_TAG_OPTIONS", 10)
+MIN_TAG_FILE_COUNT   = get_int("MIN_TAG_FILE_COUNT", 1)
 RANDOM_TAG_OPTIONS   = get_int("RANDOM_TAG_OPTIONS", 10)
 DEBUG_MODE           = get_bool("DEBUG_MODE", True)
 
@@ -120,6 +121,16 @@ def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
         if not tag.startswith("filename:") and not is_filtered_tag(tag)
     ]
 
+    file_counts = {tag: get_tag_file_count(tag, client) for tag in all_tags}
+    if MIN_TAG_FILE_COUNT > 1:
+        dropped = sum(1 for tag in all_tags if file_counts[tag] < MIN_TAG_FILE_COUNT)
+        if dropped:
+            logger.info(
+                f"Hiding {dropped} tag(s) with fewer than {MIN_TAG_FILE_COUNT} files "
+                f"from the search picker (MIN_TAG_FILE_COUNT)."
+            )
+        all_tags = [tag for tag in all_tags if file_counts[tag] >= MIN_TAG_FILE_COUNT]
+
     top_tags = all_tags[-TOP_TAG_OPTIONS:] if TOP_TAG_OPTIONS > 0 else []
     bottom_tags = all_tags[:BOTTOM_TAG_OPTIONS] if BOTTOM_TAG_OPTIONS > 0 else []
 
@@ -149,9 +160,6 @@ def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
     for label in ["Top", "Random", "Bottom"]:
         for tag in categories[label]:
             ordered_rows.append((label, tag))
-
-    unique_tags = {tag for _, tag in ordered_rows}
-    file_counts = {tag: get_tag_file_count(tag, client) for tag in unique_tags}
 
     # column layout
     max_rows = max(len(categories[k]) for k in ("Top", "Random", "Bottom")) if any(categories.values()) else 0

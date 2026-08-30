@@ -93,6 +93,14 @@ BOTTOM_TAG_OPTIONS = 20
 
 RANDOM_TAG_OPTIONS = 20
 
+# MIN_TAG_FILE_COUNT: minimum number of files a tag must have in Hydrus to be eligible
+# for the interactive search picker (Top/Random/Bottom lists). Tags with fewer matching
+# files than this are dropped before the lists are built, so the picker isn't cluttered
+# with tiny, barely-used tags. Set to 1 (or 0) to disable filtering. Reasonable range:
+# 1-20; comfortable default: 5.
+
+MIN_TAG_FILE_COUNT = 5
+
 # AMOUNT_OF_TAGS_IN_CHARTS: maximum number of tags displayed in charts. Larger values
 # show more detail but reduce readability. Reasonable range: 10-100; comfortable default: 40.
 
