@@ -49,6 +49,11 @@ DEFAULT_FILE_QUERY = get_list(
 )
 AMOUNT_OF_TAGS_IN_CHARTS = get_int("AMOUNT_OF_TAGS_IN_CHARTS", 20)
 
+mmr_service_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
+if not mmr_service_key or mmr_service_key == "FILL_ME_IN":
+    print("WARNING: TAGRANK_MMR_SERVICE_KEY is not configured in config/KEYS.")
+    print("  TagRank will continue without writing file MMR ratings to Hydrus until that key is set.")
+
 FileMetaData = dict[str, Any]
 
 try:
@@ -153,6 +158,25 @@ class RatingSystem:
         file_id = file_1_metadata["file_id"]
         return self.client.get_file_path(file_id)["path"]
 
+    def write_file_mmr_rating(self, file_metadata: FileMetaData) -> bool:
+        file_hash = file_metadata.get("hash")
+        service_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
+        if not file_hash or not service_key or service_key == "FILL_ME_IN":
+            return False
+
+        score = file_average_popularity_score(file_metadata, self)
+        if not math.isfinite(score):
+            return False
+
+        try:
+            int_score = int(round(score))
+            self.client.set_rating(service_key, int_score, hashes=[file_hash])
+            print(f"TagRank MMR written for file hash '{file_hash}': {int_score}")
+            return True
+        except Exception as e:
+            print(f"ERROR: Could not write TagRank MMR rating for hash '{file_hash}': {e}")
+            return False
+
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = [
             tag for tag in tags_from_file(winner)
@@ -179,8 +203,11 @@ class RatingSystem:
             if not tag.startswith("filename:") and not is_filtered_tag(tag) and tag not in loser_tags:
                 go_back_ratings[tag] = self.current_ratings[tag]
                 self.current_ratings[tag] = new_rating
+
         self.go_back_ratings_stack.append(go_back_ratings)
         self.known_comparison_choices.append((winner["file_id"], loser["file_id"]))
+        self.write_file_mmr_rating(winner)
+        self.write_file_mmr_rating(loser)
 
     def rating_for_tag(self, tag: str) -> Rating:
         if tag not in self.current_ratings and not tag.startswith("filename:") and not is_filtered_tag(tag):
@@ -352,6 +379,9 @@ class Window(QtWidgets.QWidget):
             return
         meta_datas = self.rating_system.convert_image_ids_to_file_meta_data(image_ids)
         self.rating_system.process_undo()
+        if meta_datas is not None:
+            for file_metadata in meta_datas:
+                self.rating_system.write_file_mmr_rating(file_metadata)
         self.store_metadata_and_show_images_for_comparison_pair(meta_datas)
         self.comparisons -= 1
         self.set_window_title_based_on_comparison_count()

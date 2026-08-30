@@ -143,6 +143,7 @@ KEYS_TEMPLATE = """\
 API_URL = http://127.0.0.1:45869/
 API_KEY = FILL_ME_IN
 RATING_SERVICE_KEY = FILL_ME_IN
+TAGRANK_MMR_SERVICE_KEY = FILL_ME_IN
 # =============================================================
 """
 
