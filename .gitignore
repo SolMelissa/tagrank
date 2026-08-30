@@ -5,6 +5,7 @@
 /ratings.json
 /SEARCH_QUERY
 /comparisons.json
-
-
+/config/*
 /.idea/*
+bash.exe.stackdump
+/.claude/*
