@@ -5,6 +5,7 @@ import math
 import os
 import random
 import sys
+from datetime import datetime
 from importlib.metadata import version
 from json import JSONDecodeError
 from pathlib import Path
@@ -131,6 +132,90 @@ class RatingSystem:
             f.write(json.dumps([(tag, [rating.mu, rating.sigma]) for tag, rating in self.current_ratings.items()]))
         with open(Path("./comparisons.json"), "w") as f:
             f.write(json.dumps([[first, second] for first, second in self.known_comparison_choices]))
+
+    @staticmethod
+    def _bounded_ratio(value: float, scale: float) -> float:
+        if not math.isfinite(value) or not math.isfinite(scale) or scale <= 0:
+            return 0.0
+        return max(0.0, min(1.0, abs(value) / scale))
+
+    def build_prediction_entry(self, left_file_metadata: FileMetaData, right_file_metadata: FileMetaData, user_selection: str) -> dict[str, Any]:
+        left_tag_score = average_tag_confidence(left_file_metadata, self)
+        right_tag_score = average_tag_confidence(right_file_metadata, self)
+        left_photo_score = self.file_score(left_file_metadata)
+        right_photo_score = self.file_score(right_file_metadata)
+
+        left_tags = tags_from_file(left_file_metadata)
+        right_tags = tags_from_file(right_file_metadata)
+        left_tag_certainty = sum(tag_confidence(tag, self) for tag in left_tags) / len(left_tags) if left_tags else 0.0
+        right_tag_certainty = sum(tag_confidence(tag, self) for tag in right_tags) / len(right_tags) if right_tags else 0.0
+        left_photo_certainty = left_photo_score
+        right_photo_certainty = right_photo_score
+
+        tag_gap = abs(left_tag_score - right_tag_score)
+        photo_gap = abs(left_photo_score - right_photo_score)
+        tag_a_score = left_tag_score
+        tag_b_score = right_tag_score
+        photo_a_score = left_photo_score
+        photo_b_score = right_photo_score
+
+        tag_prediction = "A" if left_tag_score >= right_tag_score else "B"
+        photo_prediction = "A" if left_photo_score >= right_photo_score else "B"
+
+        tag_gap_scale = max(1.0, abs(left_tag_score) + abs(right_tag_score))
+        photo_gap_scale = max(1.0, abs(left_photo_score) + abs(right_photo_score))
+        tag_certainty_scale = max(1.0, abs(left_tag_certainty) + abs(right_tag_certainty))
+        photo_certainty_scale = max(1.0, abs(left_photo_certainty) + abs(right_photo_certainty))
+
+        tag_gap_norm = self._bounded_ratio(tag_gap, tag_gap_scale)
+        photo_gap_norm = self._bounded_ratio(photo_gap, photo_gap_scale)
+        tag_certainty_norm = self._bounded_ratio((left_tag_certainty + right_tag_certainty) / 2.0, tag_certainty_scale)
+        photo_certainty_norm = self._bounded_ratio((left_photo_certainty + right_photo_certainty) / 2.0, photo_certainty_scale)
+
+        tag_confidence_component = tag_gap_norm * tag_certainty_norm
+        photo_confidence_component = photo_gap_norm * photo_certainty_norm
+        confidence = 0.5 * tag_confidence_component + 0.5 * photo_confidence_component
+
+        now = datetime.now()
+        return {
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M:%S"),
+            "user_selection": user_selection,
+            "tag_prediction": tag_prediction,
+            "photo_prediction": photo_prediction,
+            "confidence": round(max(0.0, min(1.0, float(confidence))), 6),
+            "tag_a_score": left_tag_score,
+            "tag_b_score": right_tag_score,
+            "photo_a_score": left_photo_score,
+            "photo_b_score": right_photo_score,
+            "tag_gap": tag_gap,
+            "photo_gap": photo_gap,
+            "tag_certainty_a": left_tag_certainty,
+            "tag_certainty_b": right_tag_certainty,
+            "photo_certainty_a": left_photo_certainty,
+            "photo_certainty_b": right_photo_certainty,
+            "tag_confidence_component": round(max(0.0, min(1.0, float(tag_confidence_component))), 6),
+            "photo_confidence_component": round(max(0.0, min(1.0, float(photo_confidence_component))), 6),
+        }
+
+    def write_prediction_log_entry(self, left_file_metadata: FileMetaData, right_file_metadata: FileMetaData, user_selection: str):
+        log_path = Path("./prediction_log.json")
+        try:
+            if log_path.exists():
+                with open(log_path, "r", encoding="utf-8") as f:
+                    existing_log = json.loads(f.read() or "[]")
+            else:
+                existing_log = []
+            if not isinstance(existing_log, list):
+                existing_log = []
+        except (JSONDecodeError, ValueError):
+            existing_log = []
+
+        entry = self.build_prediction_entry(left_file_metadata, right_file_metadata, user_selection)
+        existing_log.append(entry)
+
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(existing_log, f, indent=2)
 
     def get_file_pair(self) -> None | Tuple[FileMetaData, FileMetaData]:
         if len(self.file_ids) < 2:
@@ -465,10 +550,12 @@ class Window(QtWidgets.QWidget):
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         key = event.key()
         if key == QtCore.Qt.Key.Key_Left or key == QtCore.Qt.Key.Key_A:
+            self.rating_system.write_prediction_log_entry(self.left_file_metadata, self.right_file_metadata, "A")
             self.rating_system.process_result(winner=self.left_file_metadata, loser=self.right_file_metadata)
             write_choice(self.left_file_metadata["hash"], liked=True, client=self.client)
             write_choice(self.right_file_metadata["hash"], liked=False, client=self.client)
         elif key == QtCore.Qt.Key.Key_Right or key == QtCore.Qt.Key.Key_D:
+            self.rating_system.write_prediction_log_entry(self.left_file_metadata, self.right_file_metadata, "B")
             self.rating_system.process_result(winner=self.right_file_metadata, loser=self.left_file_metadata)
             write_choice(self.right_file_metadata["hash"], liked=True, client=self.client)
             write_choice(self.left_file_metadata["hash"], liked=False, client=self.client)

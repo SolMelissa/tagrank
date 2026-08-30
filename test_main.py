@@ -154,6 +154,27 @@ class DirectFileRatingTests(unittest.TestCase):
         finally:
             config._KEYS = original_keys
 
+    def test_prediction_log_tracks_raw_scores_and_confidence(self):
+        system = RatingSystem(FakeClient(), [])
+        left = tagged_metadata(1, ["liked", "bright"], 10)
+        right = tagged_metadata(2, ["disliked"], 5)
+
+        system.current_ratings["liked"] = Rating(mu=25, sigma=2)
+        system.current_ratings["bright"] = Rating(mu=20, sigma=3)
+        system.current_ratings["disliked"] = Rating(mu=10, sigma=3)
+
+        entry = system.build_prediction_entry(left, right, "A")
+
+        self.assertEqual(entry["user_selection"], "A")
+        self.assertEqual(entry["tag_prediction"], "A")
+        self.assertEqual(entry["photo_prediction"], "A")
+        self.assertIn("date", entry)
+        self.assertIn("time", entry)
+        self.assertGreaterEqual(entry["confidence"], 0.0)
+        self.assertLessEqual(entry["confidence"], 1.0)
+        self.assertIn("tag_gap", entry)
+        self.assertIn("photo_gap", entry)
+
 
 if __name__ == "__main__":
     unittest.main()
