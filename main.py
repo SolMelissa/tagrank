@@ -149,8 +149,8 @@ class RatingSystem:
         right_tags = tags_from_file(right_file_metadata)
         left_tag_certainty = sum(tag_confidence(tag, self) for tag in left_tags) / len(left_tags) if left_tags else 0.0
         right_tag_certainty = sum(tag_confidence(tag, self) for tag in right_tags) / len(right_tags) if right_tags else 0.0
-        left_photo_certainty = left_photo_score
-        right_photo_certainty = right_photo_score
+        left_photo_certainty = self.file_confidence(left_file_metadata)
+        right_photo_certainty = self.file_confidence(right_file_metadata)
 
         tag_gap = abs(left_tag_score - right_tag_score)
         photo_gap = abs(left_photo_score - right_photo_score)
@@ -284,14 +284,14 @@ class RatingSystem:
         if not file_hash or not service_key or service_key == "FILL_ME_IN":
             return False
 
-        score = self.file_score(file_metadata)
-        if not math.isfinite(score):
+        confidence = self.file_confidence(file_metadata)
+        if not math.isfinite(confidence):
             return False
 
         try:
-            int_score = int(round(score))
-            self.client.set_rating(service_key, int_score, hashes=[file_hash])
-            print(f"TagRank photo MMR confidence written for file hash '{file_hash}': {int_score}")
+            int_confidence = int(round(confidence))
+            self.client.set_rating(service_key, int_confidence, hashes=[file_hash])
+            print(f"TagRank photo MMR confidence written for file hash '{file_hash}': {int_confidence}")
             return True
         except Exception as e:
             print(f"ERROR: Could not write TagRank photo MMR confidence for hash '{file_hash}': {e}")
@@ -353,11 +353,7 @@ class RatingSystem:
         if file_id not in self.file_ratings:
             ratings = file_metadata.get("ratings") or {}
             mmr_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
-            confidence_key = key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip()
-            service_key = mmr_key if mmr_key and mmr_key != "FILL_ME_IN" else confidence_key
-            raw_score = ratings.get(service_key)
-            if raw_score is None and service_key != confidence_key and confidence_key and confidence_key != "FILL_ME_IN":
-                raw_score = ratings.get(confidence_key)
+            raw_score = ratings.get(mmr_key)
             try:
                 score = float(raw_score)
             except (TypeError, ValueError):
@@ -369,6 +365,9 @@ class RatingSystem:
 
     def file_score(self, file_metadata: FileMetaData) -> float:
         return trueskill_number_from_rating(self.file_rating_for_file(file_metadata))
+
+    def file_confidence(self, file_metadata: FileMetaData) -> float:
+        return trueskill_confidence_from_rating(self.file_rating_for_file(file_metadata))
 
 
 class Window(QtWidgets.QWidget):
@@ -712,6 +711,17 @@ def trueskill_number_from_rating(rating: Rating) -> float:
     return (rating.mu - (3 * rating.sigma)) * MMR_SCALE
 
 
+def trueskill_confidence_from_rating(rating: Rating) -> float:
+    """Confidence in the MMR rating: higher when sigma (uncertainty) is lower.
+
+    This is the secondary TrueSkill stat (sigma), not the rating itself (mu - 3*sigma).
+    Scaled the same way as the MMR score so it is comparable/writable to Hydrus.
+    """
+    default_sigma = Rating().sigma
+    normalized_certainty = max(0.0, min(1.0, (default_sigma - rating.sigma) / default_sigma))
+    return normalized_certainty * MMR_SCALE
+
+
 def trueskill_score_from_scaled_mmr(score: float) -> float:
     try:
         numeric_score = float(score)
@@ -922,14 +932,14 @@ def build_session_summary_figures(
         ax.set_xlabel("Date", fontsize=10)
         ax.set_ylabel("Number of Comparisons", fontsize=10)
         ax.grid(axis="y", alpha=0.2, linestyle='--')
-        
+
         # Add value labels on bars
         for bar in bars:
             height = bar.get_height()
             ax.text(bar.get_x() + bar.get_width()/2., height,
                    f'{int(height)}',
                    ha='center', va='bottom', fontsize=8)
-        
+
         fig.autofmt_xdate(rotation=45, ha='right')
         fig.tight_layout()
         figures.append(fig)
@@ -947,7 +957,7 @@ def build_session_summary_figures(
         calibration_values = []
         calibration_labels = []
         sample_counts = []
-        
+
         for start, end in zip(bins[:-1], bins[1:]):
             bucket = [entry for entry in prediction_entries if start <= float(entry.get("confidence", 0.0)) < end]
             if not bucket:
@@ -957,25 +967,25 @@ def build_session_summary_figures(
                 correctness = [1.0 if entry.get("tag_prediction") == entry.get("user_selection") else 0.0 for entry in bucket]
                 accuracy = float(sum(correctness) / len(correctness))
                 sample_counts.append(len(bucket))
-            
+
             calibration_values.append(accuracy)
             calibration_labels.append(f"{start:.1f}–{end:.1f}")
-        
+
         if len(calibration_values) > 0 and sum(sample_counts) > 0:
             fig, ax = plt.subplots(figsize=(11, 5))
             colors = ["#E45756" if v > 0 else "#CCCCCC" for v in calibration_values]
             bars = ax.bar(calibration_labels, calibration_values, color=colors, edgecolor="#A83339", linewidth=1.2)
-            
+
             # Reference line for perfect calibration
             ax.axhline(0.5, color="black", linestyle="--", linewidth=1.5, alpha=0.6, label="Perfect calibration")
-            
+
             ax.set_title("Tag Model Confidence Calibration", fontsize=12, fontweight='bold')
             ax.set_xlabel("Confidence Bin", fontsize=10)
             ax.set_ylabel("Observed Correctness", fontsize=10)
             ax.set_ylim(-0.05, 1.1)
             ax.grid(axis="y", alpha=0.2, linestyle='--')
             ax.legend(loc='upper left', fontsize=9)
-            
+
             # Add sample count labels on bars
             for bar, count in zip(bars, sample_counts):
                 if count > 0:
@@ -983,7 +993,7 @@ def build_session_summary_figures(
                     ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
                            f'n={count}',
                            ha='center', va='bottom', fontsize=8, style='italic')
-            
+
             fig.tight_layout()
             figures.append(fig)
         else:
@@ -1007,23 +1017,23 @@ def build_session_summary_figures(
     fig, ax = plt.subplots(figsize=(10, max(5.0, 0.35 * len(available_tags) + 1.5)))
     labels = [tag for tag, _ in available_tags]
     scores = [trueskill_number_from_rating(rating) for _, rating in available_tags]
-    
+
     bars = ax.barh(labels[::-1], scores[::-1], color="#B279A2", edgecolor="#7D4F77", linewidth=1.2)
     ax.invert_yaxis()
-    
+
     # Add score labels on bars
     for i, (bar, score) in enumerate(zip(bars, scores[::-1])):
         ax.text(score + 0.3, bar.get_y() + bar.get_height()/2.,
                f'{score:.1f}',
                ha='left', va='center', fontsize=9, fontweight='bold')
-    
+
     title_suffix = f"(showing {len(labels)} of {total_ranked_tags})" if len(labels) < total_ranked_tags else f"(all {total_ranked_tags})"
     ax.set_title(f"Final Tag Rankings by TrueSkill Score\n{title_suffix}", fontsize=12, fontweight='bold')
     ax.set_xlabel("TrueSkill Score", fontsize=10)
     ax.set_ylabel("Tag", fontsize=10)
     ax.grid(axis="x", alpha=0.2, linestyle='--')
     ax.set_xlim(0, max(scores) * 1.15 if scores else 10)
-    
+
     fig.tight_layout()
     figures.append(fig)
 
@@ -1037,7 +1047,7 @@ def run_for_rank_tags(client) -> None:
         print(f"         The exact path is: {files_path_path.resolve()}")
 
     from tagrank_pool import build_pool, prompt_for_search
-    query = prompt_for_search()  # numbered most-liked tags, 0 = custom search
+    query = prompt_for_search(client)  # numbered most-liked tags, 0 = custom search
     hashes = build_pool(client=client, query=query)
     if not hashes:
         print_no_relevant_files_then_exit(query)
