@@ -234,10 +234,13 @@ def build_pool(client: hydrus_api.Client | None = None,
     satisfied = pool_size if MIN_POOL_SATISFIED is None else MIN_POOL_SATISFIED
 
     while distance <= MAX_DISTANCE_HARD:
-        seed_str = " ".join(seeds)
-        predicates = [f"system:similar to {seed_str} with distance {distance}",
-                      f"system:limit = {pool_size * API_LIMIT_FUZZ}"]
-        logger.info(f"[DEBUG] similarity search at distance {distance}")
+        predicates = list(query)
+        predicates.extend(
+            f"system:similar to {seed} with distance {distance}"
+            for seed in seeds
+        )
+        predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
+        logger.info(f"[DEBUG] similarity search at distance {distance}: {predicates}")
         try:
             resp = client.search_files(predicates, return_hashes=True)
             similar_hashes = list(resp.get("hashes") or [])

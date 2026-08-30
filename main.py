@@ -154,12 +154,21 @@ class RatingSystem:
         return self.client.get_file_path(file_id)["path"]
 
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
-        winner_tags = tags_from_file(winner)
-        loser_tags = tags_from_file(loser)
-        winner_ratings = tuple([self.rating_for_tag(tag) for tag in winner_tags
-                               if not tag.startswith("filename:") and not is_filtered_tag(tag)])
-        loser_ratings = tuple([self.rating_for_tag(tag) for tag in loser_tags
-                              if not tag.startswith("filename:") and not is_filtered_tag(tag)])
+        winner_tags = [
+            tag for tag in tags_from_file(winner)
+            if not tag.startswith("filename:") and not is_filtered_tag(tag)
+        ]
+        loser_tags = [
+            tag for tag in tags_from_file(loser)
+            if not tag.startswith("filename:") and not is_filtered_tag(tag)
+        ]
+
+        if len(winner_tags) < 2 or len(loser_tags) < 2:
+            return
+
+        winner_ratings = tuple(self.rating_for_tag(tag) for tag in winner_tags)
+        loser_ratings = tuple(self.rating_for_tag(tag) for tag in loser_tags)
+
         new_winner_ratings, new_loser_ratings = rate([winner_ratings, loser_ratings], ranks=[0, 1])
         go_back_ratings: dict[str, Rating] = dict()
         for tag, new_rating in zip(loser_tags, new_loser_ratings):
@@ -188,19 +197,118 @@ class Window(QtWidgets.QWidget):
         self.rating_system: RatingSystem = rating_system
         self.go_back_image_pairs_stack: list[Tuple[int, int]] = []
         self.comparisons = 0
+        self._last_scaled_pair: tuple[int, int] | None = None
         self.set_window_title_based_on_comparison_count()
-        self.setLayout(QtWidgets.QHBoxLayout())
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        self.main_layout = QtWidgets.QHBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(8)
+
+        self.comparison_surface = QtWidgets.QWidget()
+        self.comparison_layout = QtWidgets.QStackedLayout(self.comparison_surface)
+        self.comparison_layout.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
+        self.main_layout.addWidget(self.comparison_surface, 1)
+
+        self.image_container = QtWidgets.QWidget()
+        self.image_layout = QtWidgets.QHBoxLayout(self.image_container)
+        self.image_layout.setContentsMargins(0, 0, 0, 0)
+        self.image_layout.setSpacing(8)
+        self.comparison_layout.addWidget(self.image_container)
+
         self.leftImageLabel = QtWidgets.QLabel("left image")
         self.rightImageLabel = QtWidgets.QLabel("right image")
-        self.layout().addWidget(self.leftImageLabel)
-        self.layout().addWidget(self.rightImageLabel)
+        self.leftImageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.rightImageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.leftImageLabel.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.rightImageLabel.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.leftImageLabel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        self.rightImageLabel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        self.leftImageLabel.setStyleSheet("QLabel { background: black; }")
+        self.rightImageLabel.setStyleSheet("QLabel { background: black; }")
+        self.image_layout.addWidget(self.leftImageLabel, 1)
+        self.image_layout.addWidget(self.rightImageLabel, 1)
         for label in [self.leftImageLabel, self.rightImageLabel]:
-            label.setMinimumWidth(500)
-            label.setMinimumHeight(500)
+            label.setMinimumWidth(260)
+            label.setMinimumHeight(360)
+
+        self.overlay_container = QtWidgets.QWidget(self)
+        self.overlay_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.overlay_container.setStyleSheet("QWidget { background: transparent; }")
+        self.overlay_layout = QtWidgets.QGridLayout(self.overlay_container)
+        self.overlay_layout.setContentsMargins(12, 12, 12, 12)
+        self.overlay_layout.setSpacing(6)
+
+        self.overlay_panel = QtWidgets.QFrame(self.overlay_container)
+        self.overlay_panel.setObjectName("comparisonOverlay")
+        self.overlay_panel.setStyleSheet(
+            "QFrame#comparisonOverlay {"
+            "  background: rgba(20, 20, 20, 210);"
+            "  border: 1px solid rgba(255,255,255,110);"
+            "  border-radius: 8px;"
+            "  color: white;"
+            "}"
+            "QLabel { color: white; }"
+        )
+        self.overlay_panel.setFrameShape(QtWidgets.QFrame.Shape.Box)
+        self.overlay_panel.setMaximumWidth(900)
+        self.overlay_panel_layout = QtWidgets.QHBoxLayout(self.overlay_panel)
+        self.overlay_panel_layout.setContentsMargins(10, 8, 10, 8)
+        self.overlay_panel_layout.setSpacing(10)
+
+        self.left_tags_box = QtWidgets.QPlainTextEdit()
+        self.right_tags_box = QtWidgets.QPlainTextEdit()
+        self.comparison_label = QtWidgets.QLabel()
+        self.comparison_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.comparison_label.setWordWrap(True)
+        self.comparison_label.setMinimumWidth(150)
+        self.comparison_label.setMaximumWidth(180)
+        self.comparison_label.setStyleSheet("QLabel { font-size: 9pt; font-weight: bold; }")
+        self.comparison_label.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+
+        for tags_box in (self.left_tags_box, self.right_tags_box):
+            tags_box.setReadOnly(True)
+            tags_box.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+            tags_box.setMaximumHeight(180)
+            tags_box.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            tags_box.setStyleSheet(
+                "QPlainTextEdit { background: transparent; color: white; border: 0; font-size: 8.5pt; }"
+            )
+
+        self.overlay_panel_layout.addWidget(self.left_tags_box, 1)
+        self.overlay_panel_layout.addWidget(self.comparison_label)
+        self.overlay_panel_layout.addWidget(self.right_tags_box, 1)
+        self.overlay_layout.addWidget(self.overlay_panel, 0, 0, 1, 2, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.overlay_layout.setRowStretch(0, 0)
+        self.overlay_layout.setRowStretch(1, 1)
+        self.overlay_container.raise_()
+        self.comparison_layout.addWidget(self.overlay_container)
+        self.comparison_layout.setCurrentWidget(self.overlay_container)
+
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
 
     def set_window_title_based_on_comparison_count(self):
         self.setWindowTitle(f"TagRank - Comparisons done this session: {self.comparisons}")
+
+    def file_expected_popularity_label(self, file_metadata: FileMetaData) -> str:
+        score = file_expected_popularity_score(file_metadata, self.rating_system)
+        return f"{score:.2f}"
+
+    def refresh_comparison_details(self):
+        left_tags = file_tag_text(self.left_file_metadata, self.rating_system)
+        right_tags = file_tag_text(self.right_file_metadata, self.rating_system)
+        self.left_tags_box.setPlainText(left_tags)
+        self.right_tags_box.setPlainText(right_tags)
+
+        left_score = file_average_popularity_score(self.left_file_metadata, self.rating_system)
+        right_score = file_average_popularity_score(self.right_file_metadata, self.rating_system)
+        if left_score > right_score:
+            comparison = f"{left_score:.2f}  ← likely winner\nvs\n{right_score:.2f}"
+        elif right_score > left_score:
+            comparison = f"{left_score:.2f}\nvs\n{right_score:.2f}  → likely winner"
+        else:
+            comparison = f"{left_score:.2f}  ↔  {right_score:.2f}\nroughly equal"
+        self.comparison_label.setText(f"Average MMR\n{comparison}")
+        self.overlay_panel.setVisible(True)
 
     def store_image_pair_onto_undo_stack(self, left_metadata: FileMetaData, right_metadata: FileMetaData):
         left_id = left_metadata["file_id"]
@@ -213,17 +321,29 @@ class Window(QtWidgets.QWidget):
             self.exit()
             return
         self.left_file_metadata, self.right_file_metadata = metadatas
+        self.apply_image_pair_pixmaps()
+        self.refresh_comparison_details()
+        self.setFocus()
+
+    def apply_image_pair_pixmaps(self):
+        if not self.left_file_metadata or not self.right_file_metadata:
+            return
         left_file_path = self.rating_system.path_from_metadata(self.left_file_metadata)
         right_file_path = self.rating_system.path_from_metadata(self.right_file_metadata)
+        left_pair = (int(self.left_file_metadata["file_id"]), int(self.right_file_metadata["file_id"]))
+        if self._last_scaled_pair == left_pair and self.leftImageLabel.pixmap() is not None and self.rightImageLabel.pixmap() is not None:
+            return
         self.leftImageLabel.setPixmap(
             QtGui.QPixmap(left_file_path).scaled(self.leftImageLabel.size(), Qt.AspectRatioMode.KeepAspectRatio,
                                                  Qt.TransformationMode.FastTransformation))
         self.rightImageLabel.setPixmap(
             QtGui.QPixmap(right_file_path).scaled(self.rightImageLabel.size(), Qt.AspectRatioMode.KeepAspectRatio,
                                                  Qt.TransformationMode.FastTransformation))
+        self._last_scaled_pair = left_pair
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        self.store_metadata_and_show_images_for_comparison_pair((self.left_file_metadata, self.right_file_metadata))
+        if self.left_file_metadata and self.right_file_metadata:
+            self.apply_image_pair_pixmaps()
 
     def process_undo(self):
         try:
@@ -247,7 +367,8 @@ class Window(QtWidgets.QWidget):
             write_choice(self.right_file_metadata["hash"], liked=True, client=self.client)
             write_choice(self.left_file_metadata["hash"], liked=False, client=self.client)
         elif key == QtCore.Qt.Key.Key_Down or key == QtCore.Qt.Key.Key_S:
-            pass
+            event.accept()
+            return
         elif key == QtCore.Qt.Key.Key_Escape:
             self.exit()
             return
@@ -258,7 +379,9 @@ class Window(QtWidgets.QWidget):
             self.open_files_externally()
             return
         else:
+            event.ignore()
             return
+        event.accept()
         self.comparisons += 1
         self.set_window_title_based_on_comparison_count()
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
@@ -391,6 +514,33 @@ def print_add_tags_permissions_missing_info_then_exit() -> NoReturn:
 
 def trueskill_number_from_rating(rating: Rating) -> float:
     return rating.mu - (3 * rating.sigma)
+
+
+def file_tag_text(file_metadata: FileMetaData, rating_system: RatingSystem) -> str:
+    tags = tags_from_file(file_metadata)
+    if not tags:
+        return "No visible tags\n"
+    lines = []
+    for tag in sorted(tags, key=lambda tag: (trueskill_number_from_rating(rating_system.rating_for_tag(tag)), tag), reverse=True):
+        lines.append(f"{tag} ({trueskill_number_from_rating(rating_system.rating_for_tag(tag)):.2f})")
+    return "\n".join(lines)
+
+
+def file_expected_popularity_score(file_metadata: FileMetaData, rating_system: RatingSystem) -> float:
+    total = 0.0
+    for tag in tags_from_file(file_metadata):
+        total += trueskill_number_from_rating(rating_system.rating_for_tag(tag))
+    return total
+
+
+def file_average_popularity_score(file_metadata: FileMetaData, rating_system: RatingSystem) -> float:
+    tags = tags_from_file(file_metadata)
+    if not tags:
+        return 0.0
+    return sum(
+        trueskill_number_from_rating(rating_system.rating_for_tag(tag))
+        for tag in tags
+    ) / len(tags)
 
 
 def create_client_or_exit() -> hydrus_api.Client:
