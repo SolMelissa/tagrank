@@ -5,7 +5,6 @@ import math
 import os
 import random
 import sys
-from functools import cmp_to_key
 from importlib.metadata import version
 from json import JSONDecodeError
 from pathlib import Path
@@ -16,7 +15,7 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtGui import Qt
 import matplotlib.pyplot as plt  # type: ignore
 import scipy.stats as stats  # type: ignore
-from trueskill import Rating, rate, BETA, global_env  # type: ignore
+from trueskill import Rating, rate  # type: ignore
 import numpy as np
 from tagrank_pool import write_choice
 from config import ensure_config_files, key, get_int, get_list, is_filtered_tag
@@ -54,6 +53,11 @@ if not mmr_service_key or mmr_service_key == "FILL_ME_IN":
     print("WARNING: TAGRANK_MMR_SERVICE_KEY is not configured in config/KEYS.")
     print("  TagRank will continue without writing file MMR ratings to Hydrus until that key is set.")
 
+mmr_confidence_service_key = key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip()
+if not mmr_confidence_service_key or mmr_confidence_service_key == "FILL_ME_IN":
+    print("WARNING: TAGRANK_MMR_CONFIDENCE_SERVICE_KEY is not configured in config/KEYS.")
+    print("  TagRank will continue without writing file confidence ratings to Hydrus until that key is set.")
+
 FileMetaData = dict[str, Any]
 
 try:
@@ -87,6 +91,7 @@ class RatingSystem:
         self.file_ids = file_ids
         self.used_file_pairs: set[tuple[int, int]] = set()
         self.current_ratings: dict[str, Rating] = {}
+        self.file_ratings: dict[int, Rating] = {}
 
         if Path("./ratings.json").exists():
             with open(Path("./ratings.json")) as f:
@@ -96,6 +101,7 @@ class RatingSystem:
                         self.current_ratings[tag] = Rating(rating_params[0], rating_params[1])
 
         self.go_back_ratings_stack: list[dict[str, Rating]] = []
+        self.go_back_file_ratings_stack: list[dict[int, Rating]] = []
         self.known_comparison_choices: list[Tuple[int, int]] = []
 
         if Path("./comparisons.json").exists():
@@ -111,11 +117,14 @@ class RatingSystem:
     def process_undo(self):
         try:
             last_ratings = self.go_back_ratings_stack.pop()
+            last_file_ratings = self.go_back_file_ratings_stack.pop()
             self.known_comparison_choices.pop()
         except IndexError:
             return
         for (tag, rating) in last_ratings.items():
             self.current_ratings[tag] = rating
+        for file_id, rating in last_file_ratings.items():
+            self.file_ratings[file_id] = rating
 
     def write_results_to_file(self):
         with open(Path("./ratings.json"), "w") as f:
@@ -124,15 +133,18 @@ class RatingSystem:
             f.write(json.dumps([[first, second] for first, second in self.known_comparison_choices]))
 
     def get_file_pair(self) -> None | Tuple[FileMetaData, FileMetaData]:
+        if len(self.file_ids) < 2:
+            print("Not enough files are available to create a comparison pair.")
+            return None
         ids: list[int] = random.sample(self.file_ids, k=2)
         tries = 0
-        while tuple(ids) in self.used_file_pairs:
+        while tuple(sorted(ids)) in self.used_file_pairs:
             if tries > 20:
                 print("Tried to find a new random file pair 20 times, did not succeed.")
                 return None
             ids = random.sample(self.file_ids, k=2)
             tries += 1
-        self.used_file_pairs.add(tuple(ids))  # type: ignore
+        self.used_file_pairs.add(tuple(sorted(ids)))
         return self.convert_image_ids_to_file_meta_data(tuple(ids))  # type: ignore
 
     def convert_image_ids_to_file_meta_data(self, pairs: Tuple[int, int]) -> None | Tuple[FileMetaData, FileMetaData]:
@@ -152,7 +164,11 @@ class RatingSystem:
             print(f"ERROR: Did not get two metadata objects for the file pairs '{pairs}'.")
             print(f"  This is what I did get: {metadata}")
             return None
-        return tuple(metadata)  # type: ignore
+        metadata_by_id = {int(file_data.get("file_id", -1)): file_data for file_data in metadata}
+        if any(file_id not in metadata_by_id for file_id in pairs):
+            print(f"ERROR: Hydrus returned metadata for the wrong file ids: {metadata_by_id.keys()}.")
+            return None
+        return metadata_by_id[pairs[0]], metadata_by_id[pairs[1]]
 
     def path_from_metadata(self, file_1_metadata: FileMetaData) -> Path:
         file_id = file_1_metadata["file_id"]
@@ -164,7 +180,7 @@ class RatingSystem:
         if not file_hash or not service_key or service_key == "FILL_ME_IN":
             return False
 
-        score = file_average_popularity_score(file_metadata, self)
+        score = self.file_score(file_metadata)
         if not math.isfinite(score):
             return False
 
@@ -177,6 +193,25 @@ class RatingSystem:
             print(f"ERROR: Could not write TagRank MMR rating for hash '{file_hash}': {e}")
             return False
 
+    def write_file_mmr_confidence_rating(self, file_metadata: FileMetaData) -> bool:
+        file_hash = file_metadata.get("hash")
+        service_key = key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip()
+        if not file_hash or not service_key or service_key == "FILL_ME_IN":
+            return False
+
+        score = self.file_score(file_metadata)
+        if not math.isfinite(score):
+            return False
+
+        try:
+            int_score = int(round(score))
+            self.client.set_rating(service_key, int_score, hashes=[file_hash])
+            print(f"TagRank photo MMR confidence written for file hash '{file_hash}': {int_score}")
+            return True
+        except Exception as e:
+            print(f"ERROR: Could not write TagRank photo MMR confidence for hash '{file_hash}': {e}")
+            return False
+
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = [
             tag for tag in tags_from_file(winner)
@@ -187,32 +222,68 @@ class RatingSystem:
             if not tag.startswith("filename:") and not is_filtered_tag(tag)
         ]
 
-        if len(winner_tags) < 2 or len(loser_tags) < 2:
-            return
-
-        winner_ratings = tuple(self.rating_for_tag(tag) for tag in winner_tags)
-        loser_ratings = tuple(self.rating_for_tag(tag) for tag in loser_tags)
-
-        new_winner_ratings, new_loser_ratings = rate([winner_ratings, loser_ratings], ranks=[0, 1])
         go_back_ratings: dict[str, Rating] = dict()
-        for tag, new_rating in zip(loser_tags, new_loser_ratings):
-            if not tag.startswith("filename:") and not is_filtered_tag(tag):
-                go_back_ratings[tag] = self.current_ratings[tag]
+        winner_only_tags = sorted(set(winner_tags) - set(loser_tags))
+        loser_only_tags = sorted(set(loser_tags) - set(winner_tags))
+        if winner_only_tags and loser_only_tags:
+            winner_ratings = tuple(self.rating_for_tag(tag) for tag in winner_only_tags)
+            loser_ratings = tuple(self.rating_for_tag(tag) for tag in loser_only_tags)
+            new_winner_ratings, new_loser_ratings = rate([winner_ratings, loser_ratings], ranks=[0, 1])
+            for tag, new_rating in zip(loser_only_tags, new_loser_ratings):
+                if tag not in go_back_ratings:
+                    go_back_ratings[tag] = self.current_ratings[tag]
                 self.current_ratings[tag] = new_rating
-        for tag, new_rating in zip(winner_tags, new_winner_ratings):
-            if not tag.startswith("filename:") and not is_filtered_tag(tag) and tag not in loser_tags:
-                go_back_ratings[tag] = self.current_ratings[tag]
+            for tag, new_rating in zip(winner_only_tags, new_winner_ratings):
+                if tag not in go_back_ratings:
+                    go_back_ratings[tag] = self.current_ratings[tag]
                 self.current_ratings[tag] = new_rating
+
+        winner_id = int(winner["file_id"])
+        loser_id = int(loser["file_id"])
+        go_back_file_ratings = {
+            winner_id: self.file_rating_for_file(winner),
+            loser_id: self.file_rating_for_file(loser),
+        }
+        new_winner_file_rating, new_loser_file_rating = rate(
+            [[go_back_file_ratings[winner_id]], [go_back_file_ratings[loser_id]]], ranks=[0, 1]
+        )
+        self.file_ratings[winner_id] = new_winner_file_rating[0]
+        self.file_ratings[loser_id] = new_loser_file_rating[0]
 
         self.go_back_ratings_stack.append(go_back_ratings)
+        self.go_back_file_ratings_stack.append(go_back_file_ratings)
         self.known_comparison_choices.append((winner["file_id"], loser["file_id"]))
         self.write_file_mmr_rating(winner)
         self.write_file_mmr_rating(loser)
+        self.write_file_mmr_confidence_rating(winner)
+        self.write_file_mmr_confidence_rating(loser)
 
     def rating_for_tag(self, tag: str) -> Rating:
         if tag not in self.current_ratings and not tag.startswith("filename:") and not is_filtered_tag(tag):
             self.current_ratings[tag] = Rating()
         return self.current_ratings[tag]
+
+    def file_rating_for_file(self, file_metadata: FileMetaData) -> Rating:
+        file_id = int(file_metadata["file_id"])
+        if file_id not in self.file_ratings:
+            ratings = file_metadata.get("ratings") or {}
+            mmr_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
+            confidence_key = key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip()
+            service_key = mmr_key if mmr_key and mmr_key != "FILL_ME_IN" else confidence_key
+            raw_score = ratings.get(service_key)
+            if raw_score is None and service_key != confidence_key and confidence_key and confidence_key != "FILL_ME_IN":
+                raw_score = ratings.get(confidence_key)
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = 0.0
+            if not math.isfinite(score):
+                score = 0.0
+            self.file_ratings[file_id] = rating_from_trueskill_score(trueskill_score_from_scaled_mmr(score))
+        return self.file_ratings[file_id]
+
+    def file_score(self, file_metadata: FileMetaData) -> float:
+        return trueskill_number_from_rating(self.file_rating_for_file(file_metadata))
 
 
 class Window(QtWidgets.QWidget):
@@ -259,7 +330,8 @@ class Window(QtWidgets.QWidget):
             label.setMinimumHeight(360)
 
         self.overlay_container = QtWidgets.QWidget(self)
-        self.overlay_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.overlay_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.overlay_container.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.overlay_container.setStyleSheet("QWidget { background: transparent; }")
         self.overlay_layout = QtWidgets.QGridLayout(self.overlay_container)
         self.overlay_layout.setContentsMargins(12, 12, 12, 12)
@@ -267,6 +339,8 @@ class Window(QtWidgets.QWidget):
 
         self.overlay_panel = QtWidgets.QFrame(self.overlay_container)
         self.overlay_panel.setObjectName("comparisonOverlay")
+        self.overlay_panel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.overlay_panel.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.overlay_panel.setStyleSheet(
             "QFrame#comparisonOverlay {"
             "  background: rgba(20, 20, 20, 210);"
@@ -286,6 +360,7 @@ class Window(QtWidgets.QWidget):
         self.right_tags_box = QtWidgets.QPlainTextEdit()
         self.comparison_label = QtWidgets.QLabel()
         self.comparison_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.comparison_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.comparison_label.setWordWrap(True)
         self.comparison_label.setMinimumWidth(150)
         self.comparison_label.setMaximumWidth(180)
@@ -296,6 +371,8 @@ class Window(QtWidgets.QWidget):
             tags_box.setReadOnly(True)
             tags_box.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
             tags_box.setMaximumHeight(180)
+            tags_box.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            tags_box.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             tags_box.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
             tags_box.setStyleSheet(
                 "QPlainTextEdit { background: transparent; color: white; border: 0; font-size: 8.5pt; }"
@@ -316,25 +393,24 @@ class Window(QtWidgets.QWidget):
     def set_window_title_based_on_comparison_count(self):
         self.setWindowTitle(f"TagRank - Comparisons done this session: {self.comparisons}")
 
-    def file_expected_popularity_label(self, file_metadata: FileMetaData) -> str:
-        score = file_expected_popularity_score(file_metadata, self.rating_system)
-        return f"{score:.2f}"
-
     def refresh_comparison_details(self):
         left_tags = file_tag_text(self.left_file_metadata, self.rating_system)
         right_tags = file_tag_text(self.right_file_metadata, self.rating_system)
         self.left_tags_box.setPlainText(left_tags)
         self.right_tags_box.setPlainText(right_tags)
 
-        left_score = file_average_popularity_score(self.left_file_metadata, self.rating_system)
-        right_score = file_average_popularity_score(self.right_file_metadata, self.rating_system)
-        if left_score > right_score:
-            comparison = f"{left_score:.2f}  ← likely winner\nvs\n{right_score:.2f}"
-        elif right_score > left_score:
-            comparison = f"{left_score:.2f}\nvs\n{right_score:.2f}  → likely winner"
-        else:
-            comparison = f"{left_score:.2f}  ↔  {right_score:.2f}\nroughly equal"
-        self.comparison_label.setText(f"Average MMR\n{comparison}")
+        left_photo_score = self.rating_system.file_score(self.left_file_metadata)
+        right_photo_score = self.rating_system.file_score(self.right_file_metadata)
+        left_tag_score = average_tag_confidence(self.left_file_metadata, self.rating_system)
+        right_tag_score = average_tag_confidence(self.right_file_metadata, self.rating_system)
+        self.comparison_label.setText(
+            format_comparison_label(
+                left_photo_score,
+                right_photo_score,
+                left_tag_score,
+                right_tag_score,
+            )
+        )
         self.overlay_panel.setVisible(True)
 
     def store_image_pair_onto_undo_stack(self, left_metadata: FileMetaData, right_metadata: FileMetaData):
@@ -542,8 +618,89 @@ def print_add_tags_permissions_missing_info_then_exit() -> NoReturn:
     sys.exit(0)
 
 
+MMR_SCALE = 100
+
+
 def trueskill_number_from_rating(rating: Rating) -> float:
-    return rating.mu - (3 * rating.sigma)
+    return (rating.mu - (3 * rating.sigma)) * MMR_SCALE
+
+
+def trueskill_score_from_scaled_mmr(score: float) -> float:
+    try:
+        numeric_score = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(numeric_score):
+        return 0.0
+    return numeric_score / MMR_SCALE
+
+
+def format_comparison_label(
+    left_photo_score: float,
+    right_photo_score: float,
+    left_tag_score: float,
+    right_tag_score: float,
+) -> str:
+    left_total = left_photo_score + left_tag_score
+    right_total = right_photo_score + right_tag_score
+
+    if left_photo_score > right_photo_score:
+        photo_arrow = "⟵"
+    elif right_photo_score > left_photo_score:
+        photo_arrow = "⟶"
+    else:
+        photo_arrow = "⟷"
+
+    if left_tag_score > right_tag_score:
+        tag_arrow = "⟵"
+    elif right_tag_score > left_tag_score:
+        tag_arrow = "⟶"
+    else:
+        tag_arrow = "⟷"
+
+    if left_total > right_total:
+        likely_winner = "⟵"
+    elif right_total > left_total:
+        likely_winner = "⟶"
+    else:
+        likely_winner = "⟷"
+
+    likely_winner_html = (
+        f"<span style=\"font-size: 24pt; font-weight: 700;\">{likely_winner}</span>"
+    )
+    return (
+        "<div style='line-height:1.4; display:flex; flex-direction:column; align-items:center; gap:4px;'>"
+        "<div style='width:100%; border:1px solid rgba(255,255,255,0.35); border-radius:6px; padding:4px 8px; text-align:center;'>"
+        f"<div>Photo MMR</div>"
+        f"<div>{left_photo_score:.2f} {photo_arrow} {right_photo_score:.2f}</div>"
+        "</div>"
+        "<div style='width:100%; border:1px solid rgba(255,255,255,0.35); border-radius:6px; padding:4px 8px; text-align:center;'>"
+        f"<div>Tag MMR</div>"
+        f"<div>{left_tag_score:.2f} {tag_arrow} {right_tag_score:.2f}</div>"
+        "</div>"
+        "<div style='width:100%; border:1px solid rgba(255,255,255,0.35); border-radius:6px; padding:4px 8px; text-align:center;'>"
+        f"<div>Likely Winner</div>"
+        f"<div>{likely_winner_html}</div>"
+        "</div>"
+        "</div>"
+    )
+
+
+def average_tag_confidence(file_metadata: FileMetaData, rating_system: RatingSystem) -> float:
+    tags = tags_from_file(file_metadata)
+    if not tags:
+        return 0.0
+    return sum(tag_confidence(tag, rating_system) for tag in tags) / len(tags)
+
+
+def tag_confidence(tag: str, rating_system: RatingSystem) -> float:
+    return trueskill_number_from_rating(rating_system.rating_for_tag(tag))
+
+
+def rating_from_trueskill_score(score: float) -> Rating:
+    """Hydrus stores the conservative TrueSkill score as one numeric value."""
+    default_sigma = Rating().sigma
+    return Rating(score + (3 * default_sigma), default_sigma)
 
 
 def file_tag_text(file_metadata: FileMetaData, rating_system: RatingSystem) -> str:
@@ -551,26 +708,9 @@ def file_tag_text(file_metadata: FileMetaData, rating_system: RatingSystem) -> s
     if not tags:
         return "No visible tags\n"
     lines = []
-    for tag in sorted(tags, key=lambda tag: (trueskill_number_from_rating(rating_system.rating_for_tag(tag)), tag), reverse=True):
-        lines.append(f"{tag} ({trueskill_number_from_rating(rating_system.rating_for_tag(tag)):.2f})")
+    for tag in sorted(tags, key=lambda tag: (tag_confidence(tag, rating_system), tag), reverse=True):
+        lines.append(f"{tag} (confidence: {tag_confidence(tag, rating_system):.2f})")
     return "\n".join(lines)
-
-
-def file_expected_popularity_score(file_metadata: FileMetaData, rating_system: RatingSystem) -> float:
-    total = 0.0
-    for tag in tags_from_file(file_metadata):
-        total += trueskill_number_from_rating(rating_system.rating_for_tag(tag))
-    return total
-
-
-def file_average_popularity_score(file_metadata: FileMetaData, rating_system: RatingSystem) -> float:
-    tags = tags_from_file(file_metadata)
-    if not tags:
-        return 0.0
-    return sum(
-        trueskill_number_from_rating(rating_system.rating_for_tag(tag))
-        for tag in tags
-    ) / len(tags)
 
 
 def create_client_or_exit() -> hydrus_api.Client:
@@ -647,20 +787,14 @@ def run_for_rank_tags(client) -> None:
     plt.show()
 
 
-def compare_two_teams(left_file: Tuple[int, list[Rating]], right_file: Tuple[int, list[Rating]]) -> int:
-    left_team = left_file[1]
-    right_team = right_file[1]
-    p = win_probability(left_team, right_team)
-    return p - 0.5
-
-
-def win_probability(team1, team2):
-    delta_mu = sum(r.mu for r in team1) - sum(r.mu for r in team2)
-    sum_sigma = sum(r.sigma ** 2 for r in itertools.chain(team1, team2))
-    size = len(team1) + len(team2)
-    denom = math.sqrt(size * (BETA * BETA) + sum_sigma)
-    ts = global_env()
-    return ts.cdf(delta_mu / denom)
+def sort_files_by_mmr(
+    file_infos: list[Tuple[int, FileMetaData]], rating_system: RatingSystem
+) -> list[Tuple[int, FileMetaData]]:
+    return sorted(
+        file_infos,
+        key=lambda file_info: rating_system.file_score(file_info[1]),
+        reverse=True,
+    )
 
 
 def delete_existing_sort_tags_if_needed(client: hydrus_api.Client) -> None:
@@ -723,13 +857,10 @@ def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
         print_no_relevant_files_to_sort_then_exit()
     file_ids = [int(file_id) for file_id in response["file_ids"]]
     print(f"Found {len(file_ids)} files that have at least one ranked tag.")
-    file_ids_to_tags: list[Tuple[int, list[str]]] = [(file_id, tags_from_file(metadata))
-                                                     for (file_id, metadata) in get_file_infos_from_client(client, file_ids)]
-    print("Got the tags for each file from the client.")
-    file_ids_to_ratings: list[Tuple[int, list[Rating]]] = [
-        (file_id, [rating_system.rating_for_tag(tag) for tag in tags]) for (file_id, tags) in file_ids_to_tags]
-    print("Now sorting the list... This may take a very long time!")
-    sorted_file_ids_to_ratings = sorted(file_ids_to_ratings, key=cmp_to_key(compare_two_teams), reverse=True)
+    file_infos = get_file_infos_from_client(client, file_ids)
+    print("Got metadata and direct MMR ratings for each file from the client.")
+    print("Now sorting the list by tagrankMMR...")
+    sorted_file_infos = sort_files_by_mmr(file_infos, rating_system)
     print("Sorted the list. Now setting the sort-order tags in hydrus.")
     services_response = client.get_services()
     services_map = services_response["services"]
@@ -740,7 +871,7 @@ def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
                 found_service_id = service_id
             if service_data["name"] == "my tags":
                 found_service_id = service_id
-    for (index, (file_id, _)) in enumerate(sorted_file_ids_to_ratings):
+    for (index, (file_id, _)) in enumerate(sorted_file_infos):
         client.add_tags(file_ids=[file_id], service_keys_to_tags={found_service_id: [f"TagRankSort:{index}"]})
     print("Have sent all the tags to the client.")
     print("DONE! If you need info on how to use this to sort your files, read below:")

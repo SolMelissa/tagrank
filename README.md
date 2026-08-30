@@ -1,6 +1,6 @@
 # TagRank
-is a hydrus API script that uses trueskill to figure out which tags you like best.
-By making you choose which of two files you like more, over and over again, the trueskill system will figure out which tags you like most.
+is a hydrus API script that uses trueskill to figure out which tags and pictures you like best.
+By making you choose which of two files you like more, over and over again, the trueskill system will figure out which tags you like most and will maintain direct MMR ratings for the pictures.
 It does this by employing the same ranking algorithm that Microsoft uses for its Xbox online games.
 
 TagRank will show you pairs of files, over and over again.
@@ -9,7 +9,7 @@ You can stop at any time by pressing the `ESCape` key, your progress will be sav
 Press the `left arrow` or `A key` if you prefer the left image, the `right arrow` or `D key` for the right, and the `down arrow` or `S key` if there is no clear winner.
 To go back one image pair, press `Backspace` or the `R key`. If you need to open the files externally to zoom in or pan you can press the `O key`. This will open the two files in the default program you have for that file.
 
-TrueSkill uses these comparisons to create normal distributions for the "quality" of each tag, and a confidence score that says how sure it is of these results.
+TrueSkill uses these comparisons to create normal distributions for the "quality" of each tag, and a confidence score that says how sure it is of these results. The tagrankMMR Hydrus rating service stores each picture's direct comparison rating; it is not calculated by averaging tag ratings.
 TagRank that uses these results to create a representation of this data.
 
 When you are done rating games TagRank will show you the top 20 tags and their skill distributions.

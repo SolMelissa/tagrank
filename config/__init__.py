@@ -144,6 +144,7 @@ API_URL = http://127.0.0.1:45869/
 API_KEY = FILL_ME_IN
 RATING_SERVICE_KEY = FILL_ME_IN
 TAGRANK_MMR_SERVICE_KEY = FILL_ME_IN
+TAGRANK_MMR_CONFIDENCE_SERVICE_KEY = FILL_ME_IN
 # =============================================================
 """
 
@@ -170,6 +171,7 @@ MIN_POOL_SATISFIED =       # percentage of pool_size to consider "enough"; 100 =
 # ====================== UI / MISC ======================
 TOP_TAG_OPTIONS = 20       # how many "most liked" tags to offer
 AMOUNT_OF_TAGS_IN_CHARTS = 20
+
 DEBUG_MODE = True
 # =============================================================
 """
