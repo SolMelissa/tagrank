@@ -12,7 +12,7 @@ from tagrank.service import Session
 from tests.conftest import FakeClient, tagged_metadata
 
 
-def _fake_start_session(*, query=None, pool_size=None):
+def _fake_start_session(*, query=None, pool_size=None, preset_id=None, pool_strategy=None):
     client = FakeClient()
     rating_system = RatingSystem(client, [1, 2])
     rating_system.convert_image_ids_to_file_meta_data = lambda pair: (

@@ -1,0 +1,10 @@
+Badge icons in this directory are drawn from the game-icons.net set
+(https://game-icons.net), licensed under Creative Commons 3.0 BY.
+
+Icons made by:
+  - Lorc, http://lorcblog.blogspot.com
+  - Delapouite, https://delapouite.com
+  - Skoll
+  - Caro Asercion
+
+See https://creativecommons.org/licenses/by/3.0/ for the full license text.

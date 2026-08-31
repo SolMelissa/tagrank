@@ -16,14 +16,42 @@ class SummaryDashboard(QtWidgets.QWidget):
         self.setWindowTitle("TagRank - Session Summary")
         self.resize(1100, 800)
 
-        self.grid_layout = QtWidgets.QGridLayout(self)
-        self.grid_layout.setContentsMargins(4, 4, 4, 4)
+        outer_layout = QtWidgets.QVBoxLayout(self)
+        outer_layout.setContentsMargins(4, 4, 4, 4)
+        outer_layout.setSpacing(4)
+
+        self.rising_star_label = QtWidgets.QLabel("Rising Star Feed: no movers yet this session.")
+        self.rising_star_label.setWordWrap(True)
+        self.rising_star_label.setStyleSheet(
+            "QLabel { font-weight: bold; padding: 4px 6px; background: rgba(84, 162, 75, 0.15); "
+            "border-radius: 4px; }"
+        )
+        outer_layout.addWidget(self.rising_star_label)
+
+        grid_container = QtWidgets.QWidget()
+        outer_layout.addWidget(grid_container, 1)
+        self.grid_layout = QtWidgets.QGridLayout(grid_container)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
         self.grid_layout.setSpacing(4)
         self.canvases: list[FigureCanvasQTAgg] = []
 
         self.refresh()
 
+    def _refresh_rising_star_feed(self) -> None:
+        if not self.rating_system.settings.ui.rising_star_feed_enabled:
+            self.rising_star_label.hide()
+            return
+        self.rising_star_label.show()
+        movers = self.rating_system.rising_star_feed(top_n=8)
+        risers = [f"{tag} (+{delta:.1f})" for tag, delta in movers if delta > 0]
+        if risers:
+            self.rising_star_label.setText("\U0001F4C8 Rising Star Feed: " + "  •  ".join(risers))
+        else:
+            self.rising_star_label.setText("Rising Star Feed: no movers yet this session.")
+
     def refresh(self) -> None:
+        self._refresh_rising_star_feed()
+
         prediction_entries = load_prediction_entries()
         top_tags = top_tags_from_rating_system(self.rating_system, self.amount_of_tags)
 
