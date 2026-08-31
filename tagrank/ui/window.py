@@ -274,9 +274,8 @@ class Window(QtWidgets.QMainWindow):
         for tag, earned in {**result_info.get("winner_tag_badges", {}), **result_info.get("loser_tag_badges", {})}.items():
             for badge in earned:
                 messages.append(f"{badge.icon} '{tag}' earned {badge.name}!")
-        for earned in (result_info.get("winner_file_badges") or []) + (result_info.get("loser_file_badges") or []):
-            for badge in earned:
-                messages.append(f"{badge.icon} A picture earned {badge.name}!")
+        for badge in (result_info.get("winner_file_badges") or []) + (result_info.get("loser_file_badges") or []):
+            messages.append(f"{badge.icon} A picture earned {badge.name}!")
         underdog = result_info.get("underdog_alert")
         if underdog is not None:
             messages.append(f"\U0001F6A8 Underdog Alert! ({underdog['sigma_multiple']:.1f}σ upset)")
@@ -455,22 +454,31 @@ class Window(QtWidgets.QMainWindow):
         event.accept()
         self.comparisons += 1
 
-        if self._pending_tournament_match is not None and self.active_tournament is not None:
-            winner_meta = self.left_file_metadata if winner_side == "A" else self.right_file_metadata
-            loser_meta = self.right_file_metadata if winner_side == "A" else self.left_file_metadata
-            winner_id, loser_id = int(winner_meta["file_id"]), int(loser_meta["file_id"])
-            self.active_tournament.bracket_id_to_hash[winner_id] = winner_meta["hash"]
-            self.active_tournament.bracket_id_to_hash[loser_id] = loser_meta["hash"]
-            mu_by_id = {fid: r.mu for fid, r in self.rating_system.file_ratings.items()}
-            sigma_by_id = {fid: r.sigma for fid, r in self.rating_system.file_ratings.items()}
-            tournament_module.check_bracket_buster(self.active_tournament, self._pending_tournament_match, winner_id, mu_by_id, sigma_by_id)
-            self.active_tournament.record_winner(self._pending_tournament_match, winner_id)
-            if self.active_tournament.is_complete:
-                tournament_module.finish_tournament(self.active_tournament)
-                self._show_toast(f"\U0001F3C6 Tournament complete! Champion crowned.")
+        # Cosmetic/secondary bookkeeping (tournament progress, badge/underdog toasts) must
+        # never be able to block advancing to the next pair - a bug here previously left the
+        # window stuck on the same images while the comparison count kept climbing, since an
+        # uncaught exception mid-keyPressEvent aborts everything after it (Qt just logs it and
+        # keeps running). Isolate it so the pairing flow below always executes regardless.
+        try:
+            if self._pending_tournament_match is not None and self.active_tournament is not None:
+                winner_meta = self.left_file_metadata if winner_side == "A" else self.right_file_metadata
+                loser_meta = self.right_file_metadata if winner_side == "A" else self.left_file_metadata
+                winner_id, loser_id = int(winner_meta["file_id"]), int(loser_meta["file_id"])
+                self.active_tournament.bracket_id_to_hash[winner_id] = winner_meta["hash"]
+                self.active_tournament.bracket_id_to_hash[loser_id] = loser_meta["hash"]
+                mu_by_id = {fid: r.mu for fid, r in self.rating_system.file_ratings.items()}
+                sigma_by_id = {fid: r.sigma for fid, r in self.rating_system.file_ratings.items()}
+                tournament_module.check_bracket_buster(self.active_tournament, self._pending_tournament_match, winner_id, mu_by_id, sigma_by_id)
+                self.active_tournament.record_winner(self._pending_tournament_match, winner_id)
+                if self.active_tournament.is_complete:
+                    tournament_module.finish_tournament(self.active_tournament)
+                    self._show_toast(f"\U0001F3C6 Tournament complete! Champion crowned.")
 
-        self.set_window_title_based_on_comparison_count()
-        self._announce_result(self.rating_system.last_result_info)
+            self.set_window_title_based_on_comparison_count()
+            self._announce_result(self.rating_system.last_result_info)
+        except Exception as e:
+            print(f"ERROR: tournament/badge bookkeeping failed (comparison still recorded): {e}")
+
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
         self.store_metadata_and_show_images_for_comparison_pair(self._next_pair())
         if self.on_change is not None:
