@@ -12,6 +12,7 @@ safely even before ensure_config_files() has created the files.
 from pathlib import Path
 
 CONFIG_DIR = Path(__file__).resolve().parent
+DATA_DIR = CONFIG_DIR.parent / "data"
 
 
 def _read(name: str) -> str | None:
@@ -118,6 +119,7 @@ def ensure_config_files() -> None:
     """Create config/ plus KEYS and SETTINGS (with sane defaults) if missing.
     Never overwrites existing files, so real keys/secrets are preserved."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     keys_p = CONFIG_DIR / "KEYS"
     if not keys_p.exists():

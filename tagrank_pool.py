@@ -25,12 +25,11 @@ queries).
 import json
 import logging
 import random
-from pathlib import Path
 
 import hydrus_api
 
 from config import (
-    CONFIG_DIR,
+    DATA_DIR,
     ensure_config_files,
     get_int,
     get_bool,
@@ -77,7 +76,7 @@ def _get_default_client() -> hydrus_api.Client:
 def load_ratings() -> dict[str, tuple[float, float]]:
     """Load {tag: (mu, sigma)} from ratings.json (TrueSkill params)."""
     try:
-        with open(Path("./ratings.json"), "r", encoding="utf-8") as f:
+        with open(DATA_DIR / "ratings.json", "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         logger.warning(f"Could not load ratings.json: {e}")

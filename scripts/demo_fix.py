@@ -5,10 +5,15 @@ Demo showing the fixed dashboard behavior:
 - After rating sessions: Shows 4 charts with actual data
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import matplotlib
 matplotlib.use('Agg')
 
-from main import build_session_summary_figures
+from tagrank.graphs import build_session_summary_figures
 from trueskill import Rating
 
 print("=" * 70)
