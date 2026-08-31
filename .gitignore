@@ -11,3 +11,4 @@ data/*.json.bak
 .idea/
 bash.exe.stackdump
 *.pyc
+etc/icons/
