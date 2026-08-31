@@ -6,7 +6,8 @@ config/TAG_FILTERS
 config/SETTINGS
 .mypy_cache/
 data/*.json
+data/*.jsonl
+data/*.json.bak
 .idea/
 bash.exe.stackdump
 *.pyc
-data/prediction_log.json

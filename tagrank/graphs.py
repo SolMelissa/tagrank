@@ -12,18 +12,44 @@ from config import DATA_DIR
 from tagrank.rating import RatingSystem, trueskill_number_from_rating
 
 
-def load_prediction_entries() -> list[dict[str, Any]]:
-    prediction_log_path = DATA_DIR / "prediction_log.json"
-    if not prediction_log_path.exists():
-        return []
+def _migrate_legacy_prediction_log(legacy_path) -> list[dict[str, Any]]:
+    """One-time upgrade from the old single-JSON-array log to JSONL."""
     try:
-        with open(prediction_log_path, "r", encoding="utf-8") as f:
+        with open(legacy_path, "r", encoding="utf-8") as f:
             raw_entries = json.loads(f.read() or "[]")
-        if isinstance(raw_entries, list):
-            return [entry for entry in raw_entries if isinstance(entry, dict)]
     except (JSONDecodeError, ValueError):
-        pass
-    return []
+        return []
+    if not isinstance(raw_entries, list):
+        return []
+    entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+    jsonl_path = legacy_path.with_suffix(".jsonl")
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+    legacy_path.rename(legacy_path.with_suffix(".json.bak"))
+    return entries
+
+
+def load_prediction_entries() -> list[dict[str, Any]]:
+    jsonl_path = DATA_DIR / "prediction_log.jsonl"
+    legacy_path = DATA_DIR / "prediction_log.json"
+    if not jsonl_path.exists() and legacy_path.exists():
+        return _migrate_legacy_prediction_log(legacy_path)
+    if not jsonl_path.exists():
+        return []
+    entries = []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+    return entries
 
 
 def top_tags_from_rating_system(rating_system: RatingSystem, amount_of_tags: int) -> list[tuple[str, Rating]]:
