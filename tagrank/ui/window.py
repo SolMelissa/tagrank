@@ -8,11 +8,15 @@ import hydrus_api  # type: ignore
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtGui import Qt
 
+from tagrank import badges, tournament as tournament_module
+from tagrank.presets import load_presets
 from tagrank.rating import FileMetaData, RatingSystem, average_tag_confidence, file_tag_text, format_comparison_label
 from tagrank.pool import write_choice
+from tagrank.settings import POOL_STRATEGIES, get_settings_store
+from tagrank.ui.settings_dialog import SettingsDialog
 
 
-class Window(QtWidgets.QWidget):
+class Window(QtWidgets.QMainWindow):
     def __init__(
         self,
         rating_system: RatingSystem,
@@ -28,11 +32,39 @@ class Window(QtWidgets.QWidget):
         self.go_back_image_pairs_stack: list[tuple[int, int]] = []
         self.comparisons = 0
         self._last_scaled_pair: tuple[int, int] | None = None
+        self.active_tournament: tournament_module.Tournament | None = None
+        self._pending_tournament_match: tournament_module.Match | None = None
         self.set_window_title_based_on_comparison_count()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
-        self.main_layout = QtWidgets.QHBoxLayout(self)
+
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        self.main_layout = QtWidgets.QHBoxLayout(central)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(8)
+
+        self._build_menu_bar()
+
+        self.badge_toast = QtWidgets.QLabel(self)
+        self.badge_toast.setStyleSheet(
+            "QLabel { background: rgba(30,30,30,230); color: gold; border: 1px solid gold; "
+            "border-radius: 6px; padding: 6px 10px; font-weight: bold; }"
+        )
+        self.badge_toast.setWordWrap(True)
+        self.badge_toast.hide()
+        self._toast_timer = QtCore.QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self.badge_toast.hide)
+
+        self.left_badge_row = QtWidgets.QWidget()
+        self.right_badge_row = QtWidgets.QWidget()
+        self.left_badge_layout = QtWidgets.QHBoxLayout(self.left_badge_row)
+        self.right_badge_layout = QtWidgets.QHBoxLayout(self.right_badge_row)
+        for badge_layout in (self.left_badge_layout, self.right_badge_layout):
+            badge_layout.setContentsMargins(0, 2, 0, 2)
+            badge_layout.setSpacing(4)
+            badge_layout.addStretch(1)
+            badge_layout.addStretch(1)
 
         self.comparison_surface = QtWidgets.QWidget()
         self.comparison_layout = QtWidgets.QStackedLayout(self.comparison_surface)
@@ -55,8 +87,14 @@ class Window(QtWidgets.QWidget):
         self.rightImageLabel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         self.leftImageLabel.setStyleSheet("QLabel { background: black; }")
         self.rightImageLabel.setStyleSheet("QLabel { background: black; }")
-        self.image_layout.addWidget(self.leftImageLabel, 1)
-        self.image_layout.addWidget(self.rightImageLabel, 1)
+        left_column = QtWidgets.QVBoxLayout()
+        left_column.addWidget(self.leftImageLabel, 1)
+        left_column.addWidget(self.left_badge_row, 0)
+        right_column = QtWidgets.QVBoxLayout()
+        right_column.addWidget(self.rightImageLabel, 1)
+        right_column.addWidget(self.right_badge_row, 0)
+        self.image_layout.addLayout(left_column, 1)
+        self.image_layout.addLayout(right_column, 1)
         for label in [self.leftImageLabel, self.rightImageLabel]:
             label.setMinimumWidth(260)
             label.setMinimumHeight(360)
@@ -120,16 +158,204 @@ class Window(QtWidgets.QWidget):
         self.comparison_layout.addWidget(self.overlay_container)
         self.comparison_layout.setCurrentWidget(self.overlay_container)
 
-        self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
+        self.store_metadata_and_show_images_for_comparison_pair(self._next_pair())
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+
+        search_menu = menu_bar.addMenu("&Search")
+        presets_menu = search_menu.addMenu("Mood/Theme Presets")
+        for preset in load_presets():
+            action = presets_menu.addAction(preset.name)
+            action.setToolTip(preset.description)
+            action.setStatusTip(preset.description)
+            action.triggered.connect(lambda checked=False, p=preset: self._show_preset_info(p))
+
+        pool_menu = menu_bar.addMenu("&Pool")
+        strategy_menu = pool_menu.addMenu("Pairing Strategy")
+        strategy_group = QtGui.QActionGroup(self)
+        strategy_group.setExclusive(True)
+        current_strategy = self.rating_system.settings.pool.pool_strategy
+        for strategy in POOL_STRATEGIES:
+            action = strategy_menu.addAction(strategy.replace("_", " ").title())
+            action.setCheckable(True)
+            action.setChecked(strategy == current_strategy)
+            action.triggered.connect(lambda checked=False, s=strategy: self._set_pool_strategy(s))
+            strategy_group.addAction(action)
+        pool_menu.addSeparator()
+        tournament_action = pool_menu.addAction("Start Tournament Mode")
+        tournament_action.triggered.connect(self._start_tournament)
+        rediscover_action = pool_menu.addAction("Surprise Me (Random Rediscovery)")
+        rediscover_action.triggered.connect(self._rediscover)
+
+        view_menu = menu_bar.addMenu("&View")
+        self.rising_star_action = view_menu.addAction("Rising Star Feed")
+        self.rising_star_action.setCheckable(True)
+        self.rising_star_action.setChecked(self.rating_system.settings.ui.rising_star_feed_enabled)
+        self.rising_star_action.toggled.connect(lambda on: self._set_ui_toggle("rising_star_feed_enabled", on))
+        self.underdog_action = view_menu.addAction("Underdog Alerts")
+        self.underdog_action.setCheckable(True)
+        self.underdog_action.setChecked(self.rating_system.settings.ui.underdog_alerts_enabled)
+        self.underdog_action.toggled.connect(lambda on: self._set_ui_toggle("underdog_alerts_enabled", on))
+        view_menu.addSeparator()
+        badges_action = view_menu.addAction("View Badges...")
+        badges_action.triggered.connect(self._show_badges_dialog)
+
+        settings_menu = menu_bar.addMenu("&Settings")
+        settings_action = settings_menu.addAction("Settings...")
+        settings_action.triggered.connect(self._show_settings_dialog)
+
+        self._toolbar = self.addToolBar("Quick Actions")
+        self._toolbar.addAction(tournament_action)
+        self._toolbar.addAction(rediscover_action)
+        self._toolbar.addAction(self.rising_star_action)
+        self._toolbar.addAction(self.underdog_action)
+
+    def _set_pool_strategy(self, strategy: str) -> None:
+        store = get_settings_store()
+        new_settings = store.update({"pool.pool_strategy": strategy})
+        self.rating_system.settings = new_settings
+
+    def _set_ui_toggle(self, field_name: str, value: bool) -> None:
+        store = get_settings_store()
+        new_settings = store.update({f"ui.{field_name}": value})
+        self.rating_system.settings = new_settings
+
+    def _show_preset_info(self, preset) -> None:
+        QtWidgets.QMessageBox.information(
+            self, preset.name,
+            f"{preset.description}\n\nStart a new session from the CLI/API with preset_id="
+            f"'{preset.id}' to use it (see docs/fun-features.md).",
+        )
+
+    def _show_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self.rating_system.settings, self)
+        if dialog.exec():
+            new_settings = get_settings_store().update(dialog.changes())
+            self.rating_system.settings = new_settings
+
+    def _show_badges_dialog(self) -> None:
+        all_badges = badges.load_badges()
+        lines = []
+        for entity_key, label in (("tags", "Tags"), ("pictures", "Pictures")):
+            bucket = all_badges.get(entity_key, {})
+            if not bucket:
+                continue
+            lines.append(f"--- {label} ---")
+            for entity_id, entries in bucket.items():
+                icons = " ".join(
+                    badges.BADGE_BY_ID[e["badge_id"]].icon
+                    for e in entries if e["badge_id"] in badges.BADGE_BY_ID
+                )
+                names = ", ".join(
+                    badges.BADGE_BY_ID[e["badge_id"]].name
+                    for e in entries if e["badge_id"] in badges.BADGE_BY_ID
+                )
+                lines.append(f"{icons}  {entity_id}: {names}")
+        text = "\n".join(lines) if lines else "No badges earned yet - keep comparing!"
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Earned Badges")
+        box.setText(text)
+        box.exec()
+
+    def _show_toast(self, text: str) -> None:
+        self.badge_toast.setText(text)
+        self.badge_toast.adjustSize()
+        self.badge_toast.move(
+            (self.width() - self.badge_toast.width()) // 2,
+            self.menuBar().height() + 10,
+        )
+        self.badge_toast.show()
+        self.badge_toast.raise_()
+        self._toast_timer.start(4000)
+
+    def _announce_result(self, result_info: dict) -> None:
+        messages = []
+        for tag, earned in {**result_info.get("winner_tag_badges", {}), **result_info.get("loser_tag_badges", {})}.items():
+            for badge in earned:
+                messages.append(f"{badge.icon} '{tag}' earned {badge.name}!")
+        for earned in (result_info.get("winner_file_badges") or []) + (result_info.get("loser_file_badges") or []):
+            for badge in earned:
+                messages.append(f"{badge.icon} A picture earned {badge.name}!")
+        underdog = result_info.get("underdog_alert")
+        if underdog is not None:
+            messages.append(f"\U0001F6A8 Underdog Alert! ({underdog['sigma_multiple']:.1f}σ upset)")
+        if messages:
+            self._show_toast("\n".join(messages))
+
+    def _next_pair(self) -> tuple[FileMetaData, FileMetaData] | None:
+        if self.active_tournament is not None and not self.active_tournament.is_complete:
+            match = self.active_tournament.pending_match()
+            self._pending_tournament_match = match
+            if match is None:
+                return None
+            return self.rating_system.convert_image_ids_to_file_meta_data((match.left_id, match.right_id))
+        self._pending_tournament_match = None
+        return self.rating_system.get_file_pair()
+
+    def _start_tournament(self) -> None:
+        max_size = self.rating_system.settings.pool.max_tournament_size
+        self.active_tournament = tournament_module.start_tournament(self.rating_system.file_ids, max_size)
+        self._show_toast(f"\U0001F3C6 Tournament started: {len(self.active_tournament.entrants)} entrants!")
+        self.store_metadata_and_show_images_for_comparison_pair(self._next_pair())
+
+    def _rediscover(self) -> None:
+        picked = self.rating_system.pick_rediscovery_file_id()
+        if picked is None:
+            self._show_toast("Not enough rated pictures yet for Random Rediscovery.")
+            return
+        opponent_candidates = [fid for fid in self.rating_system.file_ids if fid != picked]
+        if not opponent_candidates:
+            return
+        import random
+        opponent = random.choice(opponent_candidates)
+        self.rating_system.inject_rediscovery_pick(picked)
+        pair = self.rating_system.convert_image_ids_to_file_meta_data((picked, opponent))
+        self.store_metadata_and_show_images_for_comparison_pair(pair)
 
     def set_window_title_based_on_comparison_count(self):
-        self.setWindowTitle(f"TagRank - Comparisons done this session: {self.comparisons}")
+        title = f"TagRank - Comparisons done this session: {self.comparisons}"
+        if self.active_tournament is not None:
+            title += f" | Tournament: round {self.active_tournament.current_round + 1}/{len(self.active_tournament.rounds)}"
+        self.setWindowTitle(title)
+
+    def _render_badge_strip(self, layout: QtWidgets.QHBoxLayout, entity_type: str, entity_id: str) -> None:
+        """Repopulate `layout` with one icon widget per earned badge (real SVG icon from
+        game-icons.net, falling back to the badge's emoji if the file can't be loaded), each
+        with a tooltip showing the badge's name and description."""
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        layout.addStretch(1)
+        for badge_id in sorted(badges.held_badge_ids(entity_type, entity_id)):
+            badge = badges.BADGE_BY_ID.get(badge_id)
+            if badge is None:
+                continue
+            icon_label = QtWidgets.QLabel()
+            pixmap = QtGui.QIcon(str(badges.icon_path(badge_id))).pixmap(24, 24)
+            if pixmap.isNull():
+                icon_label.setText(badge.icon)
+            else:
+                icon_label.setPixmap(pixmap)
+            icon_label.setToolTip(f"{badge.icon} {badge.name}\n{badge.description}")
+            icon_label.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            layout.addWidget(icon_label)
+        layout.addStretch(1)
 
     def refresh_comparison_details(self):
         left_tags = file_tag_text(self.left_file_metadata, self.rating_system)
         right_tags = file_tag_text(self.right_file_metadata, self.rating_system)
         self.left_tags_box.setPlainText(left_tags)
         self.right_tags_box.setPlainText(right_tags)
+
+        left_hash = self.left_file_metadata.get("hash")
+        right_hash = self.right_file_metadata.get("hash")
+        self._render_badge_strip(self.left_badge_layout, "picture", left_hash or "")
+        self._render_badge_strip(self.right_badge_layout, "picture", right_hash or "")
 
         left_photo_score = self.rating_system.file_score(self.left_file_metadata)
         right_photo_score = self.rating_system.file_score(self.right_file_metadata)
@@ -198,12 +424,15 @@ class Window(QtWidgets.QWidget):
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         key = event.key()
+        winner_side = None
         if key == QtCore.Qt.Key.Key_Left or key == QtCore.Qt.Key.Key_A:
+            winner_side = "A"
             self.rating_system.write_prediction_log_entry(self.left_file_metadata, self.right_file_metadata, "A")
             self.rating_system.process_result(winner=self.left_file_metadata, loser=self.right_file_metadata)
             write_choice(self.left_file_metadata["hash"], liked=True, client=self.client)
             write_choice(self.right_file_metadata["hash"], liked=False, client=self.client)
         elif key == QtCore.Qt.Key.Key_Right or key == QtCore.Qt.Key.Key_D:
+            winner_side = "B"
             self.rating_system.write_prediction_log_entry(self.left_file_metadata, self.right_file_metadata, "B")
             self.rating_system.process_result(winner=self.right_file_metadata, loser=self.left_file_metadata)
             write_choice(self.right_file_metadata["hash"], liked=True, client=self.client)
@@ -225,9 +454,25 @@ class Window(QtWidgets.QWidget):
             return
         event.accept()
         self.comparisons += 1
+
+        if self._pending_tournament_match is not None and self.active_tournament is not None:
+            winner_meta = self.left_file_metadata if winner_side == "A" else self.right_file_metadata
+            loser_meta = self.right_file_metadata if winner_side == "A" else self.left_file_metadata
+            winner_id, loser_id = int(winner_meta["file_id"]), int(loser_meta["file_id"])
+            self.active_tournament.bracket_id_to_hash[winner_id] = winner_meta["hash"]
+            self.active_tournament.bracket_id_to_hash[loser_id] = loser_meta["hash"]
+            mu_by_id = {fid: r.mu for fid, r in self.rating_system.file_ratings.items()}
+            sigma_by_id = {fid: r.sigma for fid, r in self.rating_system.file_ratings.items()}
+            tournament_module.check_bracket_buster(self.active_tournament, self._pending_tournament_match, winner_id, mu_by_id, sigma_by_id)
+            self.active_tournament.record_winner(self._pending_tournament_match, winner_id)
+            if self.active_tournament.is_complete:
+                tournament_module.finish_tournament(self.active_tournament)
+                self._show_toast(f"\U0001F3C6 Tournament complete! Champion crowned.")
+
         self.set_window_title_based_on_comparison_count()
+        self._announce_result(self.rating_system.last_result_info)
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
-        self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
+        self.store_metadata_and_show_images_for_comparison_pair(self._next_pair())
         if self.on_change is not None:
             self.on_change()
 

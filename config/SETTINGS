@@ -43,6 +43,14 @@ SEED_COUNT_FOR_QUERY = 1000
 #
 API_LIMIT_FUZZ = 1
 
+# POOL_STRATEGY: top | random | bottom | confidence_duel | divergence
+# confidence_duel pairs items whose sigma ranges overlap most (fastest convergence);
+# divergence pairs items with close mu regardless of sigma (forces ties to separate).
+POOL_STRATEGY = random
+
+# MAX_TOURNAMENT_SIZE: max images randomly drawn into a Tournament Mode bracket.
+MAX_TOURNAMENT_SIZE = 64
+
 # ====================== DISTANCE ESCALATION ======================
 # These settings control how far the search is allowed to drift when the initial
 # similarity match is too sparse or too weak.
@@ -109,5 +117,14 @@ AMOUNT_OF_TAGS_IN_CHARTS = 20
 # DEBUG_MODE: prints extra diagnostics about pool-building/search behavior while the
 # program runs. Keep this on while tuning settings; turn it off for a cleaner workflow.
 #
+# CONFIDENCE_SIGMA_THRESHOLD: sigma below this counts as "Rock Solid"/confident. Gates
+# several badges and Underdog Alerts so early, volatile ratings don't look like upsets.
+CONFIDENCE_SIGMA_THRESHOLD = 3.0
+
+# RISING_STAR_FEED_ENABLED / UNDERDOG_ALERTS_ENABLED: toggle the live biggest-mover
+# leaderboard and upset notifications during a session.
+RISING_STAR_FEED_ENABLED = True
+UNDERDOG_ALERTS_ENABLED = True
+
 DEBUG_MODE = True
 # =============================================================
