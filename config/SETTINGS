@@ -46,7 +46,7 @@ API_LIMIT_FUZZ = 1
 # POOL_STRATEGY: top | random | bottom | confidence_duel | divergence
 # confidence_duel pairs items whose sigma ranges overlap most (fastest convergence);
 # divergence pairs items with close mu regardless of sigma (forces ties to separate).
-POOL_STRATEGY = random
+POOL_STRATEGY = confidence_duel
 
 # MAX_TOURNAMENT_SIZE: max images randomly drawn into a Tournament Mode bracket.
 MAX_TOURNAMENT_SIZE = 64
