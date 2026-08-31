@@ -179,23 +179,9 @@ class RatingSystem:
 
     def write_prediction_log_entry(self, left_file_metadata: FileMetaData, right_file_metadata: FileMetaData, user_selection: str):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        log_path = DATA_DIR / "prediction_log.json"
-        try:
-            if log_path.exists():
-                with open(log_path, "r", encoding="utf-8") as f:
-                    existing_log = json.loads(f.read() or "[]")
-            else:
-                existing_log = []
-            if not isinstance(existing_log, list):
-                existing_log = []
-        except (JSONDecodeError, ValueError):
-            existing_log = []
-
         entry = self.build_prediction_entry(left_file_metadata, right_file_metadata, user_selection)
-        existing_log.append(entry)
-
-        with open(log_path, "w", encoding="utf-8") as f:
-            json.dump(existing_log, f, indent=2)
+        with open(DATA_DIR / "prediction_log.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def get_file_pair(self) -> None | tuple[FileMetaData, FileMetaData]:
         if len(self.file_ids) < 2:
