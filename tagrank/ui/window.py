@@ -2,7 +2,7 @@
 
 import contextlib
 import os
-from typing import Tuple
+from typing import Callable
 
 import hydrus_api  # type: ignore
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -13,14 +13,19 @@ from tagrank_pool import write_choice
 
 
 class Window(QtWidgets.QWidget):
-    def __init__(self, rating_system: RatingSystem, client: hydrus_api.Client, dashboard: "SummaryDashboard | None" = None):
+    def __init__(
+        self,
+        rating_system: RatingSystem,
+        client: hydrus_api.Client,
+        on_change: Callable[[], None] | None = None,
+    ):
         super().__init__()
         self.client = client
         self.left_file_metadata: FileMetaData = {}
         self.right_file_metadata: FileMetaData = {}
         self.rating_system: RatingSystem = rating_system
-        self.dashboard = dashboard
-        self.go_back_image_pairs_stack: list[Tuple[int, int]] = []
+        self.on_change = on_change
+        self.go_back_image_pairs_stack: list[tuple[int, int]] = []
         self.comparisons = 0
         self._last_scaled_pair: tuple[int, int] | None = None
         self.set_window_title_based_on_comparison_count()
@@ -145,7 +150,7 @@ class Window(QtWidgets.QWidget):
         right_id = right_metadata["file_id"]
         self.go_back_image_pairs_stack.append((left_id, right_id))
 
-    def store_metadata_and_show_images_for_comparison_pair(self, metadatas: Tuple[FileMetaData, FileMetaData] | None):
+    def store_metadata_and_show_images_for_comparison_pair(self, metadatas: tuple[FileMetaData, FileMetaData] | None):
         if metadatas is None:
             print("Was, for any reason, not able to load a pair of files. Shutting down now.")
             self.exit()
@@ -188,8 +193,8 @@ class Window(QtWidgets.QWidget):
         self.store_metadata_and_show_images_for_comparison_pair(meta_datas)
         self.comparisons -= 1
         self.set_window_title_based_on_comparison_count()
-        if self.dashboard is not None:
-            self.dashboard.refresh()
+        if self.on_change is not None:
+            self.on_change()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         key = event.key()
@@ -223,8 +228,8 @@ class Window(QtWidgets.QWidget):
         self.set_window_title_based_on_comparison_count()
         self.store_image_pair_onto_undo_stack(self.left_file_metadata, self.right_file_metadata)
         self.store_metadata_and_show_images_for_comparison_pair(self.rating_system.get_file_pair())
-        if self.dashboard is not None:
-            self.dashboard.refresh()
+        if self.on_change is not None:
+            self.on_change()
 
     def open_files_externally(self) -> None:
         file_path_right = "file://" + str(self.rating_system.path_from_metadata(self.right_file_metadata).resolve())

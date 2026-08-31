@@ -4,12 +4,11 @@ import math
 import sys
 from importlib.metadata import version
 from pathlib import Path
-from typing import Tuple
 
 from PySide6 import QtWidgets
 from trueskill import Rating  # type: ignore
 
-from config import ensure_config_files, get_int, get_list, key
+from config import ensure_config_files
 from tagrank.cli_errors import (
     print_add_tags_permissions_missing_info_then_exit,
     print_could_not_fetch_file_information_then_exit,
@@ -25,6 +24,7 @@ from tagrank.hydrus_client import (
     sort_files_by_mmr,
 )
 from tagrank.rating import RatingSystem, trueskill_number_from_rating
+from tagrank.settings import Settings, load_settings
 from tagrank.ui.summary_dashboard import SummaryDashboard
 from tagrank.ui.window import Window
 
@@ -50,26 +50,17 @@ def _check_hydrus_api_version() -> None:
         pass
 
 
-def _warn_if_rating_keys_missing() -> None:
-    mmr_service_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
-    if not mmr_service_key or mmr_service_key == "FILL_ME_IN":
+def _warn_if_rating_keys_missing(settings: Settings) -> None:
+    if not settings.hydrus.mmr_service_key or settings.hydrus.mmr_service_key == "FILL_ME_IN":
         print("WARNING: TAGRANK_MMR_SERVICE_KEY is not configured in config/KEYS.")
         print("  TagRank will continue without writing file MMR ratings to Hydrus until that key is set.")
 
-    mmr_confidence_service_key = key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip()
-    if not mmr_confidence_service_key or mmr_confidence_service_key == "FILL_ME_IN":
+    if not settings.hydrus.mmr_confidence_service_key or settings.hydrus.mmr_confidence_service_key == "FILL_ME_IN":
         print("WARNING: TAGRANK_MMR_CONFIDENCE_SERVICE_KEY is not configured in config/KEYS.")
         print("  TagRank will continue without writing file confidence ratings to Hydrus until that key is set.")
 
 
-DEFAULT_FILE_QUERY = get_list(
-    "DEFAULT_FILE_QUERY",
-    ["system:number of tags > 5", "system:filetype = image", "system:limit = 5000"],
-)
-AMOUNT_OF_TAGS_IN_CHARTS = get_int("AMOUNT_OF_TAGS_IN_CHARTS", 20)
-
-
-def run_for_rank_tags(client) -> None:
+def run_for_rank_tags(client, settings: Settings) -> None:
     files_path_path = Path("./FILES_PATH")
     if files_path_path.exists():
         print("WARNING: The `./FILES_PATH` file is no longer needed. You can remove it.")
@@ -91,10 +82,10 @@ def run_for_rank_tags(client) -> None:
         print_no_relevant_files_then_exit(query)
 
     app = QtWidgets.QApplication(sys.argv)
-    rating_system = RatingSystem(client, ids)
+    rating_system = RatingSystem(client, ids, settings)
 
-    dashboard = SummaryDashboard(rating_system, AMOUNT_OF_TAGS_IN_CHARTS)
-    window: Window = Window(rating_system, client, dashboard)
+    dashboard = SummaryDashboard(rating_system, settings.ui.amount_of_tags_in_charts)
+    window: Window = Window(rating_system, client, on_change=dashboard.refresh)
 
     window.show()
     screen_geometry = window.screen().availableGeometry() if window.screen() else None
@@ -115,7 +106,7 @@ def run_for_rank_tags(client) -> None:
         sys.exit(first_section_result)
     window.destroy()
 
-    many_tags: list[Tuple[str, Rating]] = top_tags_from_rating_system(rating_system, AMOUNT_OF_TAGS_IN_CHARTS)
+    many_tags: list[tuple[str, Rating]] = top_tags_from_rating_system(rating_system, settings.ui.amount_of_tags_in_charts)
 
     largest_mu_width = len(str(math.floor(trueskill_number_from_rating(many_tags[0][1]))))
     print("The window that shows the scores can be hard to read. So here the data in text for 10 tags:")
@@ -123,11 +114,11 @@ def run_for_rank_tags(client) -> None:
         print(f"{trueskill_number_from_rating(rating):.1f}".rjust(largest_mu_width + 3) + f": {tag}")
 
 
-def run_for_create_image_ranking(client: hydrus_api.Client) -> None:
+def run_for_create_image_ranking(client: hydrus_api.Client, settings: Settings) -> None:
     if hydrus_api.Permission.ADD_TAGS not in client.verify_access_key()["basic_permissions"]:
         print_add_tags_permissions_missing_info_then_exit()
     delete_existing_sort_tags_if_needed(client)
-    rating_system = RatingSystem(client, [])
+    rating_system = RatingSystem(client, [], settings)
     tags = list(rating_system.current_ratings.keys())
     # noinspection PyTypeChecker
     response = client.search_files(tags=[tags])
@@ -173,11 +164,12 @@ MODE_RANK_TAGS = "rank_tags"
 def main(mode: str) -> None:
     ensure_config_files()
     _check_hydrus_api_version()
-    _warn_if_rating_keys_missing()
-    client = create_client_or_exit()
+    settings = load_settings()
+    _warn_if_rating_keys_missing(settings)
+    client = create_client_or_exit(settings)
     if mode == MODE_RANK_TAGS:
-        run_for_rank_tags(client)
+        run_for_rank_tags(client, settings)
     elif mode == MODE_CREATE_IMAGE_RANKING:
-        run_for_create_image_ranking(client)
+        run_for_create_image_ranking(client, settings)
     else:
         print("ERROR: Unknown run mode!")

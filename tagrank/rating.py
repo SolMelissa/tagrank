@@ -6,12 +6,13 @@ import random
 from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any
 
 import hydrus_api  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 
-from config import DATA_DIR, is_filtered_tag, key
+from config import DATA_DIR, is_filtered_tag
+from tagrank.settings import Settings, load_settings
 
 FileMetaData = dict[str, Any]
 
@@ -64,7 +65,8 @@ def rating_from_trueskill_score(score: float) -> Rating:
 
 
 class RatingSystem:
-    def __init__(self, client: hydrus_api.Client, file_ids: list[int]):
+    def __init__(self, client: hydrus_api.Client, file_ids: list[int], settings: Settings | None = None):
+        self.settings = settings or load_settings()
         self.client = client
         self.file_ids = file_ids
         self.used_file_pairs: set[tuple[int, int]] = set()
@@ -81,7 +83,7 @@ class RatingSystem:
 
         self.go_back_ratings_stack: list[dict[str, Rating]] = []
         self.go_back_file_ratings_stack: list[dict[int, Rating]] = []
-        self.known_comparison_choices: list[Tuple[int, int]] = []
+        self.known_comparison_choices: list[tuple[int, int]] = []
 
         comparisons_path = DATA_DIR / "comparisons.json"
         if comparisons_path.exists():
@@ -195,7 +197,7 @@ class RatingSystem:
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(existing_log, f, indent=2)
 
-    def get_file_pair(self) -> None | Tuple[FileMetaData, FileMetaData]:
+    def get_file_pair(self) -> None | tuple[FileMetaData, FileMetaData]:
         if len(self.file_ids) < 2:
             print("Not enough files are available to create a comparison pair.")
             return None
@@ -210,7 +212,7 @@ class RatingSystem:
         self.used_file_pairs.add(tuple(sorted(ids)))
         return self.convert_image_ids_to_file_meta_data(tuple(ids))  # type: ignore
 
-    def convert_image_ids_to_file_meta_data(self, pairs: Tuple[int, int]) -> None | Tuple[FileMetaData, FileMetaData]:
+    def convert_image_ids_to_file_meta_data(self, pairs: tuple[int, int]) -> None | tuple[FileMetaData, FileMetaData]:
         info = self.client.get_file_metadata(file_ids=pairs)
         if info is None:
             print(f"ERROR: Was not able to find the file metadata objects for ids '{pairs}'.")
@@ -239,7 +241,7 @@ class RatingSystem:
 
     def write_file_mmr_rating(self, file_metadata: FileMetaData) -> bool:
         file_hash = file_metadata.get("hash")
-        service_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
+        service_key = self.settings.hydrus.mmr_service_key
         if not file_hash or not service_key or service_key == "FILL_ME_IN":
             return False
 
@@ -258,7 +260,7 @@ class RatingSystem:
 
     def write_file_mmr_confidence_rating(self, file_metadata: FileMetaData) -> bool:
         file_hash = file_metadata.get("hash")
-        service_key = key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip()
+        service_key = self.settings.hydrus.mmr_confidence_service_key
         if not file_hash or not service_key or service_key == "FILL_ME_IN":
             return False
 
@@ -330,8 +332,7 @@ class RatingSystem:
         file_id = int(file_metadata["file_id"])
         if file_id not in self.file_ratings:
             ratings = file_metadata.get("ratings") or {}
-            mmr_key = key("TAGRANK_MMR_SERVICE_KEY", "").strip()
-            raw_score = ratings.get(mmr_key)
+            raw_score = ratings.get(self.settings.hydrus.mmr_service_key)
             try:
                 score = float(raw_score)
             except (TypeError, ValueError):

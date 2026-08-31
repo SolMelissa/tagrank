@@ -2,11 +2,9 @@
 
 import itertools
 import math
-from typing import Tuple
 
 import hydrus_api  # type: ignore
 
-from config import key
 from tagrank.cli_errors import (
     print_access_key_info_then_exit,
     print_connection_error_help_then_exit,
@@ -15,6 +13,7 @@ from tagrank.cli_errors import (
     print_verification_server_error_help_then_exit,
 )
 from tagrank.rating import FileMetaData, RatingSystem
+from tagrank.settings import Settings, load_settings
 
 try:
     from itertools import batched
@@ -27,12 +26,13 @@ except ImportError:
             yield batch
 
 
-def create_client_or_exit() -> hydrus_api.Client:
-    access_key = key("API_KEY").strip()
+def create_client_or_exit(settings: Settings | None = None) -> hydrus_api.Client:
+    settings = settings or load_settings()
+    access_key = settings.hydrus.api_key
     if not access_key or access_key == "FILL_ME_IN":
         print("ERROR: No API_KEY found in the config/KEYS file.")
         print_access_key_info_then_exit()
-    url = key("API_URL").strip() or None
+    url = settings.hydrus.api_url or None
     client = hydrus_api.Client(access_key, api_url=url) if url else hydrus_api.Client(access_key)
     access_key_response = None
     try:
@@ -51,8 +51,8 @@ def create_client_or_exit() -> hydrus_api.Client:
 
 
 def sort_files_by_mmr(
-    file_infos: list[Tuple[int, FileMetaData]], rating_system: RatingSystem
-) -> list[Tuple[int, FileMetaData]]:
+    file_infos: list[tuple[int, FileMetaData]], rating_system: RatingSystem
+) -> list[tuple[int, FileMetaData]]:
     return sorted(
         file_infos,
         key=lambda file_info: rating_system.file_score(file_info[1]),
@@ -63,8 +63,8 @@ def sort_files_by_mmr(
 GET_FILE_INFO_FROM_CLIENT_CHUNK_SIZE = 1000
 
 
-def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -> list[Tuple[int, FileMetaData]]:
-    file_ids_to_tags: list[Tuple[int, FileMetaData]] = []
+def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -> list[tuple[int, FileMetaData]]:
+    file_ids_to_tags: list[tuple[int, FileMetaData]] = []
 
     def get_and_process_one_chunk(chunk_of_ids: list[int]):
         file_infos_response = client.get_file_metadata(file_ids=chunk_of_ids)

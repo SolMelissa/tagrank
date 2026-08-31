@@ -2,7 +2,7 @@
 
 import json
 from json import JSONDecodeError
-from typing import Any, Tuple
+from typing import Any
 
 import matplotlib.pyplot as plt  # type: ignore
 import numpy as np
@@ -26,7 +26,7 @@ def load_prediction_entries() -> list[dict[str, Any]]:
     return []
 
 
-def top_tags_from_rating_system(rating_system: RatingSystem, amount_of_tags: int) -> list[Tuple[str, Rating]]:
+def top_tags_from_rating_system(rating_system: RatingSystem, amount_of_tags: int) -> list[tuple[str, Rating]]:
     return sorted(rating_system.current_ratings.items(),
                   key=lambda x: trueskill_number_from_rating(x[1]),
                   reverse=True)[:max(10, amount_of_tags)]

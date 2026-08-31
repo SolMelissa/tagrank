@@ -1,11 +1,8 @@
 /.mypy_cache/
-/ACCESS_KEY
-/FILES_PATH
-/URL
-/ratings.json
-/SEARCH_QUERY
-/comparisons.json
-/config/*
+/config/KEYS
+/data/*.json
 /.idea/*
-bash.exe.stackdump
 /.claude/*
+bash.exe.stackdump
+__pycache__/
+*.pyc
