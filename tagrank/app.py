@@ -61,14 +61,20 @@ def _warn_if_rating_keys_missing(settings: Settings) -> None:
         print("  TagRank will continue without writing file confidence ratings to Hydrus until that key is set.")
 
 
-def run_for_rank_tags(client, settings: Settings) -> None:
+def run_for_rank_tags(client, settings: Settings, preset_tag: str | None = None) -> None:
     files_path_path = Path("./FILES_PATH")
     if files_path_path.exists():
         print("WARNING: The `./FILES_PATH` file is no longer needed. You can remove it.")
         print(f"         The exact path is: {files_path_path.resolve()}")
 
     from tagrank.pool import build_pool, prompt_for_search
-    query = prompt_for_search(client)  # numbered most-liked tags, 0 = custom search
+    if preset_tag is not None:
+        # Caller (e.g. Undertow's TagRank tab) already picked the tag from its own copy of the
+        # Top/Random/Bottom list - skip the interactive numbered-menu prompt entirely.
+        print(f"Using tag search: {preset_tag}")
+        query = [preset_tag]
+    else:
+        query = prompt_for_search(client)  # numbered most-liked tags, 0 = custom search
     hashes = build_pool(client=client, query=query)
     if not hashes:
         print_no_relevant_files_then_exit(query)
@@ -175,7 +181,7 @@ MODE_RANK_TAGS = "rank_tags"
 MODE_SERVE = "serve"
 
 
-def main(mode: str, *, port: int = 8420) -> None:
+def main(mode: str, *, port: int = 8420, preset_tag: str | None = None) -> None:
     ensure_config_files()
     _check_hydrus_api_version()
     settings = load_settings()
@@ -185,7 +191,7 @@ def main(mode: str, *, port: int = 8420) -> None:
         return
     client = create_client_or_exit(settings)
     if mode == MODE_RANK_TAGS:
-        run_for_rank_tags(client, settings)
+        run_for_rank_tags(client, settings, preset_tag=preset_tag)
     elif mode == MODE_CREATE_IMAGE_RANKING:
         run_for_create_image_ranking(client, settings)
     else:
