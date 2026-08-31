@@ -6,10 +6,14 @@ Run with: python test_dashboard_e2e.py
 """
 
 import json
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from trueskill import Rating
-from main import build_session_summary_figures, calculate_tag_count_for_height
+from tagrank.graphs import build_session_summary_figures, calculate_tag_count_for_height
 import matplotlib.pyplot as plt
 
 
