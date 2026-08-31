@@ -9,7 +9,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtGui import Qt
 
 from tagrank.rating import FileMetaData, RatingSystem, average_tag_confidence, file_tag_text, format_comparison_label
-from tagrank_pool import write_choice
+from tagrank.pool import write_choice
 
 
 class Window(QtWidgets.QWidget):
