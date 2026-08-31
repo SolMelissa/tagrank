@@ -6,3 +6,4 @@
 bash.exe.stackdump
 __pycache__/
 *.pyc
+data/prediction_log.json

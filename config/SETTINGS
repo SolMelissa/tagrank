@@ -8,7 +8,7 @@
 #   pool more relevant but can reduce candidate volume.
 # - Looser filters find more files, but they may include weaker or less related items.
 # - Comfortable default: keep a single image-only filter with a modest tag threshold.
-
+#
 SEARCH_QUERY = system:number of tags > 2, system:filetype = image
 DEFAULT_FILE_QUERY = system:number of tags > 2, system:filetype = image, system:limit = 5000
 
@@ -19,28 +19,28 @@ DEFAULT_FILE_QUERY = system:number of tags > 2, system:filetype = image, system:
 # POOL_SIZE: target final comparison pool size. Larger pools give better coverage
 # and more stable tag rankings, but they also increase API cost and can dilute the
 # focus with weaker matches. Reasonable range: 50-1000; comfortable default: 500.
-
+#
 POOL_SIZE = 500
 
 # CANDIDATE_SEED_COUNT: how many files are looked up once as the initial seed set
 # before similarity expansion begins. More seeds increase the odds of finding good
 # matches, but they cost more time and memory. Reasonable range: 2,000-50,000;
 # comfortable default: 10,000.
-
+#
 CANDIDATE_SEED_COUNT = 50000
 
 # SEED_COUNT_FOR_QUERY: how many of those seeds are used to issue each similarity
 # query. Raising this can help discover more relevant neighbors, but too high a value
 # makes each expansion step more expensive and may overshoot the desired similarity.
 # Reasonable range: 10-250; comfortable default: 100.
-
+#
 SEED_COUNT_FOR_QUERY = 1000
 
 # API_LIMIT_FUZZ: multiplier used when requesting results from Hydrus to account for
 # deduplication and filtering. A value of 2 means request roughly 2x POOL_SIZE to
 # compensate for duplicates and keep the final pool close to target. Reasonable range:
 # 1-5; comfortable default: 2.
-
+#
 API_LIMIT_FUZZ = 1
 
 # ====================== DISTANCE ESCALATION ======================
@@ -50,19 +50,19 @@ API_LIMIT_FUZZ = 1
 # MAX_DISTANCE_START: starting perceptual-hash distance floor. Lower values are more
 # selective and keep results visually similar; higher values broaden the search.
 # Reasonable range: 5-20; comfortable default: 10.
-
+#
 MAX_DISTANCE_START = 10
 
 # DISTANCE_STEP: how much the maximum distance increases each retry when the pool is
 # still underfilled. Larger steps move faster, smaller steps are gentler and more
 # conservative. Reasonable range: 1-5; comfortable default: 2.
-
+#
 DISTANCE_STEP = 2
 
 # MAX_DISTANCE_HARD: absolute ceiling for the search distance. This is the farthest
 # the algorithm is willing to expand before giving up. Reasonable range: 16-64;
 # comfortable default: 32 for a balanced search.
-
+#
 MAX_DISTANCE_HARD = 20
 
 # MIN_POOL_SATISFIED: minimum fraction of POOL_SIZE that must be found before the
@@ -70,7 +70,7 @@ MAX_DISTANCE_HARD = 20
 # 0.5 means 50% when expressed as a decimal. Lower numbers make the pool fill faster,
 # but they can accept weaker or more tenuous matches. Reasonable range: 50-100; comfortable
 # default: 100 for a strict pool, or 75 if you prefer faster but looser results.
-
+#
 MIN_POOL_SATISFIED = 100
 
 # ====================== UI / MISC ======================
@@ -79,18 +79,18 @@ MIN_POOL_SATISFIED = 100
 #
 # TOP_TAG_OPTIONS: number of highest-rated tags shown as positive options. More items
 # give more choice but can feel noisy. Reasonable range: 5-30; comfortable default: 15.
-
+#
 TOP_TAG_OPTIONS = 20
 
 # BOTTOM_TAG_OPTIONS: number of lowest-rated tags shown as negative options. More items
 # help you spot disliked concepts but can overwhelm the picker. Reasonable range: 5-30;
 # comfortable default: 15.
-
+#
 BOTTOM_TAG_OPTIONS = 20
 
 # RANDOM_TAG_OPTIONS: number of random tags offered to keep the selection varied. Larger
 # numbers broaden discovery but add clutter. Reasonable range: 5-30; comfortable default: 15.
-
+#
 RANDOM_TAG_OPTIONS = 20
 
 # MIN_TAG_FILE_COUNT: minimum number of files a tag must have in Hydrus to be eligible
@@ -98,16 +98,16 @@ RANDOM_TAG_OPTIONS = 20
 # files than this are dropped before the lists are built, so the picker isn't cluttered
 # with tiny, barely-used tags. Set to 1 (or 0) to disable filtering. Reasonable range:
 # 1-20; comfortable default: 5.
-
-MIN_TAG_FILE_COUNT = 5
+#
+MIN_TAG_FILE_COUNT = 50
 
 # AMOUNT_OF_TAGS_IN_CHARTS: maximum number of tags displayed in charts. Larger values
 # show more detail but reduce readability. Reasonable range: 10-100; comfortable default: 40.
-
+#
 AMOUNT_OF_TAGS_IN_CHARTS = 20
 
 # DEBUG_MODE: prints extra diagnostics about pool-building/search behavior while the
 # program runs. Keep this on while tuning settings; turn it off for a cleaner workflow.
-
+#
 DEBUG_MODE = True
 # =============================================================
