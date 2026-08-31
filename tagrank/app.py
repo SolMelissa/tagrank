@@ -66,7 +66,7 @@ def run_for_rank_tags(client, settings: Settings) -> None:
         print("WARNING: The `./FILES_PATH` file is no longer needed. You can remove it.")
         print(f"         The exact path is: {files_path_path.resolve()}")
 
-    from tagrank_pool import build_pool, prompt_for_search
+    from tagrank.pool import build_pool, prompt_for_search
     query = prompt_for_search(client)  # numbered most-liked tags, 0 = custom search
     hashes = build_pool(client=client, query=query)
     if not hashes:
