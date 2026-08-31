@@ -25,6 +25,7 @@ queries).
 import json
 import logging
 import random
+from typing import NamedTuple
 
 import hydrus_api
 
@@ -109,8 +110,30 @@ def get_tag_file_count(tag: str, client: hydrus_api.Client) -> int:
         return 0
 
 
-def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
-    """Offer a numbered list of top/bottom/random liked tags, or custom."""
+class TagOption(NamedTuple):
+    """One selectable tag in the search picker, as shown to a user or an API caller."""
+    index: int
+    tag: str
+    score: float
+    file_count: int
+
+
+class SearchOptions(NamedTuple):
+    """The top/random/bottom-scoring tag categories offered as search starting points.
+
+    `index` on each TagOption is the number a CLI user would type to pick it (also usable
+    by an API caller as an opaque id); look it up via `lookup[index]` to get the tag string.
+    """
+    top: list[TagOption]
+    random: list[TagOption]
+    bottom: list[TagOption]
+    lookup: dict[int, str]
+
+
+def build_search_options(client: hydrus_api.Client | None = None) -> SearchOptions:
+    """Pure data half of the search picker: ranks tags by TrueSkill score and buckets them
+    into Top/Random/Bottom categories, same selection logic the CLI prompt renders. Used
+    directly by the API's /search-options endpoint, and by prompt_for_search() below."""
     client = client or _get_default_client()
     ratings = load_ratings()
     ranked = sorted(ratings.items(), key=lambda kv: trueskill_score(kv[1]))
@@ -144,50 +167,55 @@ def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
         else []
     )
 
-    categories = {
-        "Top": top_tags,
-        "Random": random_tags,
-        "Bottom": bottom_tags,
-    }
+    def _to_options(tags: list[str], start_index: int) -> list[TagOption]:
+        return [
+            TagOption(
+                index=idx,
+                tag=tag,
+                score=trueskill_score(ratings.get(tag, (0.0, 0.0))),
+                file_count=file_counts.get(tag, 0),
+            )
+            for idx, tag in enumerate(tags, start=start_index)
+        ]
+
+    top_options = _to_options(top_tags, 1)
+    random_options = _to_options(random_tags, 1 + len(top_options))
+    bottom_options = _to_options(bottom_tags, 1 + len(top_options) + len(random_options))
+
+    lookup = {opt.index: opt.tag for opt in top_options + random_options + bottom_options}
+
+    return SearchOptions(top=top_options, random=random_options, bottom=bottom_options, lookup=lookup)
+
+
+def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
+    """Offer a numbered list of top/bottom/random liked tags, or custom. CLI-only (uses input())
+    -- rendering wrapper around build_search_options(); see that function for the shared logic."""
+    client = client or _get_default_client()
+    options = build_search_options(client)
 
     print("\n=== TagRank Search Selection ===")
     print("Pick a search start point, or 00 for a custom search.")
-    if not any(categories.values()):
+    if not (options.top or options.random or options.bottom):
         print("(No ratings found yet - falling straight to custom search.)")
 
-    ordered_rows: list[tuple[str, str]] = []
-    for label in ["Top", "Random", "Bottom"]:
-        for tag in categories[label]:
-            ordered_rows.append((label, tag))
-
-    # column layout
-    max_rows = max(len(categories[k]) for k in ("Top", "Random", "Bottom")) if any(categories.values()) else 0
+    categories = {"Top": options.top, "Random": options.random, "Bottom": options.bottom}
+    max_rows = max((len(v) for v in categories.values()), default=0)
     col_width = 40
 
     print(f"  {'Top':<{col_width}} {'Random':<{col_width}} Bottom")
-    top_list = list(enumerate(categories["Top"], start=1))
-    random_list = list(enumerate(categories["Random"], start=1 + len(categories["Top"])))
-    bottom_list = list(enumerate(categories["Bottom"], start=1 + len(categories["Top"]) + len(categories["Random"])))
 
-    lookup = {tag: idx for idx, tag in top_list + random_list + bottom_list}
-    per_label = {"Top": top_list, "Random": random_list, "Bottom": bottom_list}
+    def _format(opt: TagOption) -> str:
+        parts = opt.tag.split(":", 1)
+        if len(parts) == 2:
+            main, group = parts
+            return f"{opt.index:02d}: [{opt.score:.1f}] {main} ({group}) - {opt.file_count} files"
+        return f"{opt.index:02d}: [{opt.score:.1f}] {opt.tag} - {opt.file_count} files"
 
     for row in range(max_rows):
-        cells = []
-        for label in ["Top", "Random", "Bottom"]:
-            if row < len(per_label[label]):
-                idx, tag = per_label[label][row]
-                score = trueskill_score(ratings.get(tag, (0.0, 0.0)))
-                count = file_counts.get(tag, 0)
-                parts = tag.split(":", 1)
-                if len(parts) == 2:
-                    main, group = parts
-                    display = f"{idx:02d}: [{score:.1f}] {main} ({group}) - {count} files"
-                else:
-                    display = f"{idx:02d}: [{score:.1f}] {tag} - {count} files"
-                cells.append(display)
-            else:
-                cells.append("")
+        cells = [
+            _format(categories[label][row]) if row < len(categories[label]) else ""
+            for label in ["Top", "Random", "Bottom"]
+        ]
         print(f"  {cells[0]:<{col_width}} {cells[1]:<{col_width}} {cells[2]}")
 
     print("  00: custom search (comma-separated predicates; blank = everything)")
@@ -205,8 +233,8 @@ def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
             print("  Please enter a number.")
             continue
 
-        if 1 <= idx <= len(ordered_rows):
-            tag = ordered_rows[idx - 1][1]
+        tag = options.lookup.get(idx)
+        if tag is not None:
             print(f"  Using tag search: {tag}")
             return [tag]
 

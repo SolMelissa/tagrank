@@ -12,6 +12,13 @@ from tagrank.cli_errors import (
     print_permissions_error_then_exit,
     print_verification_server_error_help_then_exit,
 )
+from tagrank.errors import (
+    FileInformationError,
+    HydrusConnectionError,
+    HydrusPermissionError,
+    HydrusVerificationError,
+    MissingApiKeyError,
+)
 from tagrank.rating import FileMetaData, RatingSystem
 from tagrank.settings import Settings, load_settings
 
@@ -26,28 +33,47 @@ except ImportError:
             yield batch
 
 
-def create_client_or_exit(settings: Settings | None = None) -> hydrus_api.Client:
+def create_client(settings: Settings | None = None) -> hydrus_api.Client:
+    """Build and verify a Hydrus client, raising a tagrank.errors.TagRankError subclass on failure.
+
+    This is the version to use from the API/service layer, which needs to catch and report
+    errors per-request rather than terminating the process. See create_client_or_exit for the
+    CLI equivalent, which prints troubleshooting help and exits instead of raising.
+    """
     settings = settings or load_settings()
     access_key = settings.hydrus.api_key
     if not access_key or access_key == "FILL_ME_IN":
-        print("ERROR: No API_KEY found in the config/KEYS file.")
-        print_access_key_info_then_exit()
+        raise MissingApiKeyError("No API_KEY found in the config/KEYS file.")
     url = settings.hydrus.api_url or None
     client = hydrus_api.Client(access_key, api_url=url) if url else hydrus_api.Client(access_key)
-    access_key_response = None
     try:
         access_key_response = client.verify_access_key()
     except hydrus_api.ServerError as e:
-        print_verification_server_error_help_then_exit(e)
+        raise HydrusVerificationError(e) from e
     except hydrus_api.ConnectionError as e:
-        print_connection_error_help_then_exit(e)
+        raise HydrusConnectionError(e) from e
     except hydrus_api.InsufficientAccess as e:
-        print_permissions_error_then_exit(e)
+        raise HydrusPermissionError(e) from e
     if access_key_response is None:
-        print_verification_server_error_help_then_exit()
+        raise HydrusVerificationError()
     if 3 not in access_key_response["basic_permissions"]:
-        print_permissions_error_then_exit(None)
+        raise HydrusPermissionError()
     return client
+
+
+def create_client_or_exit(settings: Settings | None = None) -> hydrus_api.Client:
+    """CLI entrypoint: prints troubleshooting help and exits instead of raising. See create_client."""
+    try:
+        return create_client(settings)
+    except MissingApiKeyError:
+        print("ERROR: No API_KEY found in the config/KEYS file.")
+        print_access_key_info_then_exit()
+    except HydrusVerificationError as e:
+        print_verification_server_error_help_then_exit(e.server_error)
+    except HydrusConnectionError as e:
+        print_connection_error_help_then_exit(e.cause)
+    except HydrusPermissionError as e:
+        print_permissions_error_then_exit(e.cause)
 
 
 def sort_files_by_mmr(
@@ -69,7 +95,7 @@ def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -
     def get_and_process_one_chunk(chunk_of_ids: list[int]):
         file_infos_response = client.get_file_metadata(file_ids=chunk_of_ids)
         if file_infos_response is None or file_infos_response["metadata"] is None:
-            print_could_not_fetch_file_information_then_exit()
+            raise FileInformationError("Was not able to fetch file information from Hydrus.")
         file_ids_to_tags.extend((info["file_id"], info) for info in file_infos_response["metadata"])
 
     if len(file_ids) < GET_FILE_INFO_FROM_CLIENT_CHUNK_SIZE:

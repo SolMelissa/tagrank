@@ -16,6 +16,7 @@ from tagrank.cli_errors import (
     print_no_relevant_files_to_sort_then_exit,
     print_permissions_error_then_exit,
 )
+from tagrank.errors import FileInformationError
 from tagrank.graphs import top_tags_from_rating_system
 from tagrank.hydrus_client import (
     create_client_or_exit,
@@ -126,7 +127,10 @@ def run_for_create_image_ranking(client: hydrus_api.Client, settings: Settings) 
         print_no_relevant_files_to_sort_then_exit()
     file_ids = [int(file_id) for file_id in response["file_ids"]]
     print(f"Found {len(file_ids)} files that have at least one ranked tag.")
-    file_infos = get_file_infos_from_client(client, file_ids)
+    try:
+        file_infos = get_file_infos_from_client(client, file_ids)
+    except FileInformationError:
+        print_could_not_fetch_file_information_then_exit()
     print("Got metadata and direct MMR ratings for each file from the client.")
     print("Now sorting the list by tagrankMMR...")
     sorted_file_infos = sort_files_by_mmr(file_infos, rating_system)
@@ -157,15 +161,28 @@ def run_for_create_image_ranking(client: hydrus_api.Client, settings: Settings) 
     input("Press Enter to exit...")
 
 
+def run_for_serve(port: int) -> None:
+    """Run the headless HTTP API (tagrank/server.py) instead of the GUI. See docs/api.md."""
+    import uvicorn
+    from tagrank.server import app as fastapi_app
+
+    print(f"TagRank API listening on http://127.0.0.1:{port} (docs at /docs).")
+    uvicorn.run(fastapi_app, host="127.0.0.1", port=port)
+
+
 MODE_CREATE_IMAGE_RANKING = "create_image_ranking"
 MODE_RANK_TAGS = "rank_tags"
+MODE_SERVE = "serve"
 
 
-def main(mode: str) -> None:
+def main(mode: str, *, port: int = 8420) -> None:
     ensure_config_files()
     _check_hydrus_api_version()
     settings = load_settings()
     _warn_if_rating_keys_missing(settings)
+    if mode == MODE_SERVE:
+        run_for_serve(port)
+        return
     client = create_client_or_exit(settings)
     if mode == MODE_RANK_TAGS:
         run_for_rank_tags(client, settings)

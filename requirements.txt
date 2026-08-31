@@ -5,3 +5,5 @@ numpy
 scipy
 trueskill
 hydrus_api>=5.2.0
+fastapi
+uvicorn
