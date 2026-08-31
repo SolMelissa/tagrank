@@ -1,0 +1,32 @@
+[
+  {
+    "id": "deep_dive",
+    "name": "Deep Dive",
+    "description": "Many comparisons within one specific theme/character/series: narrow seed tag, large pool, tight similarity distance.",
+    "query": null,
+    "pool_size": 400,
+    "pool_strategy": "random",
+    "max_distance_start": 4,
+    "max_distance_hard": 10
+  },
+  {
+    "id": "wide_sweep",
+    "name": "Wide Sweep",
+    "description": "General-purpose ranking session across the whole library: broad/no seed tag, random pool strategy, loose similarity distance.",
+    "query": ["system:everything"],
+    "pool_size": 200,
+    "pool_strategy": "random",
+    "max_distance_start": 12,
+    "max_distance_hard": 32
+  },
+  {
+    "id": "cleanup_pass",
+    "name": "Cleanup Pass",
+    "description": "Burns down the 'still uncertain' backlog: seeded from currently high-sigma (least-confident) items, paired via Confidence Duel to converge fastest.",
+    "query": null,
+    "pool_size": 150,
+    "pool_strategy": "confidence_duel",
+    "max_distance_start": 10,
+    "max_distance_hard": 20
+  }
+]

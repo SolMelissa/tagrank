@@ -24,11 +24,11 @@ import hydrus_api  # type: ignore
 import matplotlib
 matplotlib.use("Agg")
 
-from tagrank import graphs, pool
+from tagrank import badges, graphs, pool, presets, tournament as tournament_module
 from tagrank.errors import FileInformationError, NoRelevantFilesError, TagRankError
 from tagrank.hydrus_client import create_client
 from tagrank.rating import FileMetaData, RatingSystem
-from tagrank.settings import Settings, load_settings
+from tagrank.settings import Settings, get_settings_store, load_settings
 
 
 class SessionNotFoundError(TagRankError):
@@ -52,6 +52,8 @@ class Session:
     client: hydrus_api.Client
     left: FileMetaData | None = field(default=None, repr=False)
     right: FileMetaData | None = field(default=None, repr=False)
+    tournament: tournament_module.Tournament | None = field(default=None, repr=False)
+    tournament_seed_tag: str | None = field(default=None, repr=False)
 
 
 _sessions: dict[str, Session] = {}
@@ -62,10 +64,35 @@ def start_session(
     pool_size: int | None = None,
     settings: Settings | None = None,
     client: hydrus_api.Client | None = None,
+    preset_id: str | None = None,
+    pool_strategy: str | None = None,
 ) -> Session:
     """Build a comparison pool and RatingSystem, exactly like app.run_for_rank_tags does before
-    it opens the GUI window. Raises NoRelevantFilesError / FileInformationError on failure."""
-    settings = settings or load_settings()
+    it opens the GUI window. Raises NoRelevantFilesError / FileInformationError on failure.
+
+    `preset_id` (Mood/Theme Sessions) fills in query/pool_size/pool_strategy from
+    config/presets.json for anything the caller didn't explicitly override. `pool_strategy`
+    (Top/Random/Bottom/Confidence Duel/Divergence) is applied to the session's settings so
+    RatingSystem.get_file_pair() picks pairs accordingly.
+    """
+    settings = settings or get_settings_store().current
+    if preset_id is not None:
+        preset = presets.get_preset(preset_id)
+        if preset is not None:
+            query = query if query is not None else preset.query
+            pool_size = pool_size if pool_size is not None else preset.pool_size
+            pool_strategy = pool_strategy if pool_strategy is not None else preset.pool_strategy
+            if preset.max_distance_start is not None or preset.max_distance_hard is not None:
+                from dataclasses import replace
+                settings = replace(settings, distance=replace(
+                    settings.distance,
+                    max_distance_start=preset.max_distance_start or settings.distance.max_distance_start,
+                    max_distance_hard=preset.max_distance_hard or settings.distance.max_distance_hard,
+                ))
+    if pool_strategy is not None:
+        from dataclasses import replace
+        settings = replace(settings, pool=replace(settings.pool, pool_strategy=pool_strategy))
+
     client = client or create_client(settings)
 
     hashes = pool.build_pool(client=client, query=query, pool_size=pool_size) if pool_size else pool.build_pool(client=client, query=query)
@@ -141,6 +168,91 @@ def list_tags() -> list[dict[str, Any]]:
         key=lambda entry: entry["score"],
         reverse=True,
     )
+
+
+def get_settings() -> Settings:
+    """Current effective settings, shared by the GUI panel and GET /settings."""
+    return get_settings_store().current
+
+
+def patch_settings(changes: dict[str, object]) -> Settings:
+    """Apply a partial settings edit (see settings.SettingsStore) and return the new
+    effective Settings, shared by the GUI panel and PATCH /settings."""
+    return get_settings_store().update(changes)
+
+
+def get_presets() -> list[presets.Preset]:
+    return presets.load_presets()
+
+
+def get_badges() -> dict[str, dict[str, list[dict]]]:
+    """All earned badges, keyed by entity type then tag/file-hash. See tagrank/badges.py."""
+    return badges.load_badges()
+
+
+def start_tournament(session: Session) -> tournament_module.Tournament:
+    """Draw a random bracket from the session's pool and attach it to the session."""
+    settings = session.rating_system.settings
+    pool_ids = session.rating_system.file_ids
+    tournament = tournament_module.start_tournament(pool_ids, settings.pool.max_tournament_size)
+    session.tournament = tournament
+    return tournament
+
+
+def get_tournament_pair(session: Session) -> tuple[FileMetaData, FileMetaData] | None:
+    """Next pending tournament match as a metadata pair, or None if the bracket is complete."""
+    if session.tournament is None:
+        raise NoPairAvailableError("No tournament is active on this session; call start_tournament first.")
+    match = session.tournament.pending_match()
+    if match is None:
+        return None
+    pair = session.rating_system.convert_image_ids_to_file_meta_data((match.left_id, match.right_id))
+    if pair is not None:
+        session.left, session.right = pair
+    return pair
+
+
+def submit_tournament_result(session: Session, choice: str) -> None:
+    """Judge the current tournament match: updates ratings exactly like submit_result(), then
+    advances the bracket and awards tournament badges once a champion is crowned."""
+    if session.tournament is None or session.left is None or session.right is None:
+        raise NoPairAvailableError("No tournament match is pending judgement.")
+    match = session.tournament.pending_match()
+    if match is None:
+        raise NoPairAvailableError("The tournament bracket is already complete.")
+
+    left, right = session.left, session.right
+    winner, loser = (left, right) if choice == "left" else (right, left)
+    winner_id, loser_id = int(winner["file_id"]), int(loser["file_id"])
+
+    session.tournament.bracket_id_to_hash[winner_id] = winner["hash"]
+    session.tournament.bracket_id_to_hash[loser_id] = loser["hash"]
+
+    submit_result(session, choice)  # normal rating update + regular badges/underdog alert
+
+    mu_by_id = {fid: r.mu for fid, r in session.rating_system.file_ratings.items()}
+    sigma_by_id = {fid: r.sigma for fid, r in session.rating_system.file_ratings.items()}
+    tournament_module.check_bracket_buster(session.tournament, match, winner_id, mu_by_id, sigma_by_id)
+    session.tournament.record_winner(match, winner_id)
+
+    if session.tournament.is_complete:
+        tournament_module.finish_tournament(session.tournament, seed_tag=session.tournament_seed_tag)
+
+
+def pick_rediscovery_pair(session: Session) -> tuple[FileMetaData, FileMetaData] | None:
+    """Random Rediscovery: pair a highly-rated, rarely-recently-seen file against a random
+    opponent from the pool. The rediscovered file is flagged so a win credits its
+    rediscovery-specific badges (see RatingSystem.inject_rediscovery_pick)."""
+    rediscovered_id = session.rating_system.pick_rediscovery_file_id()
+    if rediscovered_id is None or len(session.rating_system.file_ids) < 2:
+        return None
+    import random as _random
+    opponent_id = _random.choice([fid for fid in session.rating_system.file_ids if fid != rediscovered_id])
+    session.rating_system.inject_rediscovery_pick(rediscovered_id)
+    pair = session.rating_system.convert_image_ids_to_file_meta_data((rediscovered_id, opponent_id))
+    if pair is not None:
+        session.left, session.right = pair
+    return pair
 
 
 def get_search_options(client: hydrus_api.Client | None = None, settings: Settings | None = None) -> pool.SearchOptions:

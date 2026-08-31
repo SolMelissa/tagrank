@@ -14,7 +14,8 @@ Design notes:
 
 import asyncio
 import uuid
-from typing import Literal
+from dataclasses import asdict
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
@@ -69,6 +70,30 @@ class StartSessionRequest(BaseModel):
                     "to search around a specific rated tag.",
     )
     pool_size: int | None = Field(default=None, description="Override the configured POOL_SIZE for this session.")
+    preset_id: str | None = Field(default=None, description="A Mood/Theme preset id from GET /presets. Explicit query/pool_size/pool_strategy still take priority.")
+    pool_strategy: str | None = Field(default=None, description="top | random | bottom | confidence_duel | divergence. Overrides the configured POOL_STRATEGY for this session.")
+
+
+class SettingsPatchRequest(BaseModel):
+    changes: dict[str, Any] = Field(description="e.g. {'pool.pool_size': 200, 'ui.debug_mode': false}. Keys are 'section.field' paths - see GET /settings for the current shape.")
+
+
+class PresetOut(BaseModel):
+    id: str
+    name: str
+    description: str
+
+
+class BadgeEntry(BaseModel):
+    badge_id: str
+    earned_at: float
+
+
+class TournamentStatus(BaseModel):
+    entrants: int
+    rounds: int
+    is_complete: bool
+    champion: FilePairSide | None = None
 
 
 class JobStatus(BaseModel):
@@ -147,9 +172,12 @@ async def shutdown() -> dict[str, str]:
 _jobs: dict[str, JobStatus] = {}
 
 
-def _run_start_session(job_id: str, query: list[str] | None, pool_size: int | None) -> None:
+def _run_start_session(
+    job_id: str, query: list[str] | None, pool_size: int | None,
+    preset_id: str | None = None, pool_strategy: str | None = None,
+) -> None:
     try:
-        session = service.start_session(query=query, pool_size=pool_size)
+        session = service.start_session(query=query, pool_size=pool_size, preset_id=preset_id, pool_strategy=pool_strategy)
         _jobs[job_id] = JobStatus(job_id=job_id, status="ready", session_id=session.id)
     except TagRankError as e:
         _jobs[job_id] = JobStatus(job_id=job_id, status="error", error=str(e))
@@ -168,7 +196,10 @@ async def create_session(request: StartSessionRequest) -> JobStatus:
     job_id = str(uuid.uuid4())
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending")
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_start_session, job_id, request.query, request.pool_size)
+    loop.run_in_executor(
+        None, _run_start_session, job_id, request.query, request.pool_size,
+        request.preset_id, request.pool_strategy,
+    )
     return _jobs[job_id]
 
 
@@ -310,3 +341,105 @@ def history_graph_png(index: int) -> Response:
         raise HTTPException(status_code=404, detail={"error": "GraphNotFoundError", "message": f"No graph at index {index}"})
     import base64
     return Response(content=base64.b64decode(graphs_list[index]["png_base64"]), media_type="image/png")
+
+
+# --------------------------------------------------------------------------------------
+# Settings panel parity - same Settings model the GUI menu bar edits, see
+# tagrank/settings.py's SettingsStore and docs/fun-features.md for the full field list.
+# --------------------------------------------------------------------------------------
+
+@app.get("/settings", summary="Current effective settings")
+def get_settings() -> dict[str, Any]:
+    settings = service.get_settings()
+    return {
+        "search": asdict(settings.search),
+        "pool": asdict(settings.pool),
+        "distance": asdict(settings.distance),
+        "ui": asdict(settings.ui),
+    }
+
+
+@app.patch("/settings", summary="Apply a partial settings edit")
+def patch_settings(request: SettingsPatchRequest) -> dict[str, Any]:
+    settings = service.patch_settings(request.changes)
+    return {
+        "search": asdict(settings.search),
+        "pool": asdict(settings.pool),
+        "distance": asdict(settings.distance),
+        "ui": asdict(settings.ui),
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Mood/Theme presets
+# --------------------------------------------------------------------------------------
+
+@app.get("/presets", response_model=list[PresetOut], summary="Mood/Theme session presets")
+def list_presets() -> list[PresetOut]:
+    return [PresetOut(id=p.id, name=p.name, description=p.description) for p in service.get_presets()]
+
+
+# --------------------------------------------------------------------------------------
+# Badges
+# --------------------------------------------------------------------------------------
+
+@app.get("/badges", summary="All earned badges, by entity type then tag/file-hash")
+def list_badges() -> dict[str, dict[str, list[BadgeEntry]]]:
+    raw = service.get_badges()
+    return {
+        entity_key: {entity_id: [BadgeEntry(**e) for e in entries] for entity_id, entries in bucket.items()}
+        for entity_key, bucket in raw.items()
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Tournament / Bracket Mode
+# --------------------------------------------------------------------------------------
+
+def _tournament_status(session: Session) -> TournamentStatus:
+    t = session.tournament
+    champion = None
+    if t is not None and t.is_complete and t.champion_id is not None:
+        champion_hash = t.bracket_id_to_hash.get(t.champion_id, "")
+        champion = FilePairSide(file_id=t.champion_id, hash=champion_hash)
+    return TournamentStatus(
+        entrants=len(t.entrants) if t else 0,
+        rounds=len(t.rounds) if t else 0,
+        is_complete=t.is_complete if t else False,
+        champion=champion,
+    )
+
+
+@app.post("/sessions/{session_id}/tournament", response_model=TournamentStatus, summary="Start a Tournament Mode bracket")
+def start_tournament(session_id: str) -> TournamentStatus:
+    session = _get_session_or_404(session_id)
+    service.start_tournament(session)
+    return _tournament_status(session)
+
+
+@app.get("/sessions/{session_id}/tournament/next-match", response_model=PairResponse, summary="Next pending tournament match")
+def tournament_next_match(session_id: str) -> PairResponse:
+    session = _get_session_or_404(session_id)
+    pair = service.get_tournament_pair(session)
+    return _pair_to_response(pair)
+
+
+@app.post("/sessions/{session_id}/tournament/result", response_model=TournamentStatus, summary="Submit the winner of the current tournament match")
+def tournament_result(session_id: str, request: SubmitResultRequest) -> TournamentStatus:
+    session = _get_session_or_404(session_id)
+    try:
+        service.submit_tournament_result(session, request.choice)
+    except TagRankError as e:
+        _raise_http(e)
+    return _tournament_status(session)
+
+
+# --------------------------------------------------------------------------------------
+# Random Rediscovery
+# --------------------------------------------------------------------------------------
+
+@app.get("/sessions/{session_id}/rediscover", response_model=PairResponse, summary="Surprise Me: pair a highly-rated, rarely-recently-seen file")
+def rediscover(session_id: str) -> PairResponse:
+    session = _get_session_or_404(session_id)
+    pair = service.pick_rediscovery_pair(session)
+    return _pair_to_response(pair)

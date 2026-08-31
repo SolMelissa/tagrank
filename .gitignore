@@ -11,3 +11,6 @@ data/*.json.bak
 .idea/
 bash.exe.stackdump
 *.pyc
+# Raw icon-pack drop (8000+ files); only the ~60 icons actually used are committed,
+# under tagrank/ui/assets/badges/.
+etc/icons/

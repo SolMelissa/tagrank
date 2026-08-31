@@ -86,6 +86,32 @@ def get_float_or_none(name: str, default: float | None) -> float | None:
         return default
 
 
+def set_and_persist(name: str, value: object) -> None:
+    """Update one SETTINGS key in memory and rewrite config/SETTINGS with the new value,
+    preserving every other line as-is. Used by the settings panel / PATCH /settings so
+    edits survive a restart, not just the current process."""
+    global _SETTINGS
+    text_value = "" if value is None else str(value)
+    _get_settings()[name] = text_value
+
+    settings_p = CONFIG_DIR / "SETTINGS"
+    existing = settings_p.read_text(encoding="utf-8") if settings_p.exists() else ""
+    lines = existing.splitlines()
+    found = False
+    for i, raw in enumerate(lines):
+        if _strip_comment(raw).split("=", 1)[0].strip() == name:
+            comment = raw.split("#", 1)[1] if "#" in raw else None
+            new_line = f"{name} = {text_value}"
+            if comment is not None:
+                new_line += f" #{comment}"
+            lines[i] = new_line
+            found = True
+            break
+    if not found:
+        lines.append(f"{name} = {text_value}")
+    settings_p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def get_list(name: str, default: list[str]) -> list[str]:
     raw = get(name, "")
     if not raw:
@@ -163,6 +189,8 @@ POOL_SIZE = 100            # final comparison pool size
 CANDIDATE_SEED_COUNT = 10000   # diverse candidates fetched once
 SEED_COUNT_FOR_QUERY = 10      # how many seeds to rotate through when expanding the pool
 API_LIMIT_FUZZ = 2             # over-fetch multiplier to survive dedup
+POOL_STRATEGY = random         # top | random | bottom | confidence_duel | divergence
+MAX_TOURNAMENT_SIZE = 64       # max images randomly drawn into a Tournament Mode bracket
 
 # ====================== DISTANCE ESCALATION ======================
 MAX_DISTANCE_START = 10    # escalating floor; grows by DISTANCE_STEP below
@@ -173,6 +201,10 @@ MIN_POOL_SATISFIED =       # percentage of pool_size to consider "enough"; 100 =
 # ====================== UI / MISC ======================
 TOP_TAG_OPTIONS = 20       # how many "most liked" tags to offer
 AMOUNT_OF_TAGS_IN_CHARTS = 20
+
+CONFIDENCE_SIGMA_THRESHOLD = 3.0   # sigma below this = "Rock Solid"/confident; gates badges + Underdog Alerts
+RISING_STAR_FEED_ENABLED = True    # live biggest-mover leaderboard in the summary dashboard
+UNDERDOG_ALERTS_ENABLED = True     # flag upsets (mu-gap >= 3x loser's sigma) during a session
 
 DEBUG_MODE = True
 # =============================================================

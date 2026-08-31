@@ -3,6 +3,7 @@
 import json
 import math
 import random
+import time
 from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
@@ -12,6 +13,7 @@ import hydrus_api  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 
 from config import DATA_DIR, is_filtered_tag
+from tagrank import badges
 from tagrank.settings import Settings, load_settings
 
 FileMetaData = dict[str, Any]
@@ -83,15 +85,28 @@ class RatingSystem:
 
         self.go_back_ratings_stack: list[dict[str, Rating]] = []
         self.go_back_file_ratings_stack: list[dict[int, Rating]] = []
-        self.known_comparison_choices: list[tuple[int, int]] = []
+        # (winner_id, loser_id, timestamp). Older comparisons.json files only have the first
+        # two fields (see write_results_to_file's rename note); missing timestamps read as 0.0.
+        self.known_comparison_choices: list[tuple[int, int, float]] = []
+        # file_ids fed into the next get_file_pair()/process_result() specifically because
+        # Random Rediscovery resurfaced them - lets badge tracking credit "rediscovery" wins
+        # without Random Rediscovery needing to know anything about badges itself.
+        self.pending_rediscovery_ids: set[int] = set()
+        self.last_result_info: dict[str, Any] = {}
+        # tag -> mu the first time it was touched this session, for the Rising Star Feed's
+        # "biggest mover" delta. Session-scoped by design: it answers "what's moving right
+        # now", not a full multi-session history.
+        self._tag_mu_baseline: dict[str, float] = {}
 
         comparisons_path = DATA_DIR / "comparisons.json"
         if comparisons_path.exists():
             try:
                 with open(comparisons_path) as f:
                     comparisons = json.loads(f.read())
-                    for winner, loser in comparisons:
-                        self.known_comparison_choices.append((winner, loser))
+                    for entry in comparisons:
+                        winner, loser = entry[0], entry[1]
+                        ts = float(entry[2]) if len(entry) > 2 else 0.0
+                        self.known_comparison_choices.append((winner, loser, ts))
             except (JSONDecodeError, ValueError) as e:
                 from tagrank.cli_errors import print_could_not_read_comparisons_file_help
                 print_could_not_read_comparisons_file_help()
@@ -114,7 +129,7 @@ class RatingSystem:
         with open(DATA_DIR / "ratings.json", "w") as f:
             f.write(json.dumps([(tag, [rating.mu, rating.sigma]) for tag, rating in self.current_ratings.items()]))
         with open(DATA_DIR / "comparisons.json", "w") as f:
-            f.write(json.dumps([[first, second] for first, second in self.known_comparison_choices]))
+            f.write(json.dumps([[first, second, ts] for first, second, ts in self.known_comparison_choices]))
 
     @staticmethod
     def _bounded_ratio(value: float, scale: float) -> float:
@@ -183,10 +198,45 @@ class RatingSystem:
         with open(DATA_DIR / "prediction_log.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
+    def _strategy_pair(self, strategy: str) -> tuple[int, int] | None:
+        """Confidence Duel / Divergence pairing: sample a subset of unrated-pair candidates
+        (full O(n^2) scoring over a 500-file pool is unnecessary work for one pairing) and
+        score every candidate pair by the strategy's heuristic. Ratings for files not yet
+        compared this session default to TrueSkill's Rating() prior."""
+        import itertools
+
+        sample_size = min(50, len(self.file_ids))
+        candidates = random.sample(self.file_ids, k=sample_size)
+        best: tuple[int, int] | None = None
+        best_score: float | None = None
+        for a, b in itertools.combinations(candidates, 2):
+            if tuple(sorted((a, b))) in self.used_file_pairs:
+                continue
+            rating_a = self.file_ratings.get(a) or Rating()
+            rating_b = self.file_ratings.get(b) or Rating()
+            if strategy == "confidence_duel":
+                # Most sigma overlap = least certain who'd win = fastest convergence.
+                score = (rating_a.sigma + rating_b.sigma) - abs(rating_a.mu - rating_b.mu)
+            else:  # divergence: force close-mu (possibly already-confident) items to compete
+                score = -abs(rating_a.mu - rating_b.mu)
+            if best_score is None or score > best_score:
+                best_score, best = score, (a, b)
+        return best
+
     def get_file_pair(self) -> None | tuple[FileMetaData, FileMetaData]:
         if len(self.file_ids) < 2:
             print("Not enough files are available to create a comparison pair.")
             return None
+
+        strategy = self.settings.pool.pool_strategy
+        if strategy in ("confidence_duel", "divergence"):
+            strategy_pair = self._strategy_pair(strategy)
+            if strategy_pair is not None:
+                self.used_file_pairs.add(tuple(sorted(strategy_pair)))
+                return self.convert_image_ids_to_file_meta_data(strategy_pair)
+            # Fall through to random selection if the strategy couldn't find an unused pair
+            # (e.g. every sampled combination was already compared).
+
         ids: list[int] = random.sample(self.file_ids, k=2)
         tries = 0
         while tuple(sorted(ids)) in self.used_file_pairs:
@@ -197,6 +247,28 @@ class RatingSystem:
             tries += 1
         self.used_file_pairs.add(tuple(sorted(ids)))
         return self.convert_image_ids_to_file_meta_data(tuple(ids))  # type: ignore
+
+    def inject_rediscovery_pick(self, file_id: int) -> None:
+        """Mark `file_id` as coming from Random Rediscovery, so a win in the next
+        process_result() call credits the rediscovery-specific badges (see badges.py)."""
+        self.pending_rediscovery_ids.add(file_id)
+
+    def pick_rediscovery_file_id(self) -> int | None:
+        """High-mu + oldest-last-compared file from this session's pool, per Random
+        Rediscovery's design: 'surface a highly-rated but rarely-recently-seen item.'
+        Falls back to just the highest-mu file if no comparison history is available yet."""
+        if not self.file_ratings:
+            return None
+        last_seen: dict[int, float] = {}
+        for winner_id, loser_id, ts in self.known_comparison_choices:
+            last_seen[winner_id] = max(last_seen.get(winner_id, 0.0), ts)
+            last_seen[loser_id] = max(last_seen.get(loser_id, 0.0), ts)
+
+        ranked = sorted(
+            self.file_ratings.items(), key=lambda kv: trueskill_number_from_rating(kv[1]), reverse=True
+        )
+        top_half = ranked[: max(1, len(ranked) // 2)]
+        return min(top_half, key=lambda kv: last_seen.get(kv[0], 0.0))[0]
 
     def convert_image_ids_to_file_meta_data(self, pairs: tuple[int, int]) -> None | tuple[FileMetaData, FileMetaData]:
         info = self.client.get_file_metadata(file_ids=pairs)
@@ -263,6 +335,48 @@ class RatingSystem:
             print(f"ERROR: Could not write TagRank photo MMR confidence for hash '{file_hash}': {e}")
             return False
 
+    def _tag_rank_pct(self, tag: str) -> float | None:
+        """1.0 = best tag in the currently-known pool, 0.0 = worst. None if it's the only one."""
+        if len(self.current_ratings) < 2 or tag not in self.current_ratings:
+            return None
+        scores = sorted(trueskill_number_from_rating(r) for r in self.current_ratings.values())
+        my_score = trueskill_number_from_rating(self.current_ratings[tag])
+        below = sum(1 for s in scores if s <= my_score)
+        return (below - 1) / (len(scores) - 1) if len(scores) > 1 else None
+
+    def _file_rank_pct(self, file_id: int) -> float | None:
+        """Same as _tag_rank_pct but over this session's pool of pictures only (see design
+        note: TagRank has no single global list of every picture's rating to rank against)."""
+        if len(self.file_ratings) < 2 or file_id not in self.file_ratings:
+            return None
+        scores = sorted(trueskill_number_from_rating(r) for r in self.file_ratings.values())
+        my_score = trueskill_number_from_rating(self.file_ratings[file_id])
+        below = sum(1 for s in scores if s <= my_score)
+        return (below - 1) / (len(scores) - 1) if len(scores) > 1 else None
+
+    def _record_tag_badges(self, tag: str, *, won: bool, upset_sigma_multiple: float | None, beat_top3: bool) -> list:
+        rating = self.current_ratings.get(tag)
+        if rating is None:
+            return []
+        return badges.record_result(
+            "tag", tag, won=won, mu=rating.mu, sigma=rating.sigma,
+            confidence_threshold=self.settings.ui.confidence_sigma_threshold,
+            rank_pct=self._tag_rank_pct(tag),
+            upset_sigma_multiple=upset_sigma_multiple, beat_top3=beat_top3,
+        )
+
+    def _record_file_badges(self, file_id: int, file_hash: str, *, won: bool, upset_sigma_multiple: float | None) -> list:
+        rating = self.file_ratings.get(file_id)
+        if rating is None:
+            return []
+        return badges.record_result(
+            "picture", file_hash, won=won, mu=rating.mu, sigma=rating.sigma,
+            confidence_threshold=self.settings.ui.confidence_sigma_threshold,
+            rank_pct=self._file_rank_pct(file_id),
+            upset_sigma_multiple=upset_sigma_multiple,
+            is_rediscovery=file_id in self.pending_rediscovery_ids,
+        )
+
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = [
             tag for tag in tags_from_file(winner)
@@ -276,9 +390,21 @@ class RatingSystem:
         go_back_ratings: dict[str, Rating] = dict()
         winner_only_tags = sorted(set(winner_tags) - set(loser_tags))
         loser_only_tags = sorted(set(loser_tags) - set(winner_tags))
+
+        # Snapshot pre-match state for badge/upset detection before any ratings change.
+        top3_tags_before = {
+            tag for tag, _r in sorted(
+                self.current_ratings.items(), key=lambda kv: trueskill_number_from_rating(kv[1]), reverse=True
+            )[:3]
+        }
+        old_loser_tag_ratings = {tag: self.rating_for_tag(tag) for tag in loser_only_tags}
+        old_winner_tag_ratings = {tag: self.rating_for_tag(tag) for tag in winner_only_tags}
+        for tag, rating in {**old_winner_tag_ratings, **old_loser_tag_ratings}.items():
+            self._tag_mu_baseline.setdefault(tag, rating.mu)
+
         if winner_only_tags and loser_only_tags:
-            winner_ratings = tuple(self.rating_for_tag(tag) for tag in winner_only_tags)
-            loser_ratings = tuple(self.rating_for_tag(tag) for tag in loser_only_tags)
+            winner_ratings = tuple(old_winner_tag_ratings[tag] for tag in winner_only_tags)
+            loser_ratings = tuple(old_loser_tag_ratings[tag] for tag in loser_only_tags)
             new_winner_ratings, new_loser_ratings = rate([winner_ratings, loser_ratings], ranks=[0, 1])
             for tag, new_rating in zip(loser_only_tags, new_loser_ratings):
                 if tag not in go_back_ratings:
@@ -295,6 +421,8 @@ class RatingSystem:
             winner_id: self.file_rating_for_file(winner),
             loser_id: self.file_rating_for_file(loser),
         }
+        old_winner_file_rating = go_back_file_ratings[winner_id]
+        old_loser_file_rating = go_back_file_ratings[loser_id]
         new_winner_file_rating, new_loser_file_rating = rate(
             [[go_back_file_ratings[winner_id]], [go_back_file_ratings[loser_id]]], ranks=[0, 1]
         )
@@ -303,11 +431,76 @@ class RatingSystem:
 
         self.go_back_ratings_stack.append(go_back_ratings)
         self.go_back_file_ratings_stack.append(go_back_file_ratings)
-        self.known_comparison_choices.append((winner["file_id"], loser["file_id"]))
+        ts = time.time()
+        self.known_comparison_choices.append((winner["file_id"], loser["file_id"], ts))
         self.write_file_mmr_rating(winner)
         self.write_file_mmr_rating(loser)
         self.write_file_mmr_confidence_rating(winner)
         self.write_file_mmr_confidence_rating(loser)
+
+        # ---- Badges + Underdog Alerts (entity-scoped: each call only ever reads/writes
+        # the stats of the one entity it names - see tagrank/badges.py's scoping rule). ----
+        file_upset_multiple = None
+        if old_loser_file_rating.sigma > 0:
+            gap = old_winner_file_rating.mu - old_loser_file_rating.mu
+            multiple = gap / old_loser_file_rating.sigma
+            if multiple >= badges.UPSET_SIGMA_MULTIPLE:
+                file_upset_multiple = multiple
+
+        winner_file_badges = self._record_file_badges(winner_id, winner["hash"], won=True, upset_sigma_multiple=file_upset_multiple)
+        loser_file_badges = self._record_file_badges(loser_id, loser["hash"], won=False, upset_sigma_multiple=None)
+
+        winner_tag_badges: dict[str, list] = {}
+        tag_upset_multiple = None
+        beat_top3 = bool(top3_tags_before & set(loser_only_tags))
+        for tag in winner_only_tags:
+            multiple = None
+            if old_loser_tag_ratings:
+                avg_loser_mu = sum(r.mu for r in old_loser_tag_ratings.values()) / len(old_loser_tag_ratings)
+                avg_loser_sigma = sum(r.sigma for r in old_loser_tag_ratings.values()) / len(old_loser_tag_ratings)
+                if avg_loser_sigma > 0:
+                    gap = old_winner_tag_ratings[tag].mu - avg_loser_mu
+                    m = gap / avg_loser_sigma
+                    if m >= badges.UPSET_SIGMA_MULTIPLE:
+                        multiple = m
+            earned = self._record_tag_badges(tag, won=True, upset_sigma_multiple=multiple, beat_top3=beat_top3)
+            if earned:
+                winner_tag_badges[tag] = earned
+
+        loser_tag_badges: dict[str, list] = {}
+        for tag in loser_only_tags:
+            earned = self._record_tag_badges(tag, won=False, upset_sigma_multiple=None, beat_top3=False)
+            if earned:
+                loser_tag_badges[tag] = earned
+
+        underdog_alert = None
+        if self.settings.ui.underdog_alerts_enabled and file_upset_multiple is not None:
+            underdog_alert = {
+                "winner_hash": winner["hash"],
+                "loser_hash": loser["hash"],
+                "sigma_multiple": file_upset_multiple,
+            }
+
+        self.pending_rediscovery_ids = set()
+        self.last_result_info = {
+            "winner_file_badges": winner_file_badges,
+            "loser_file_badges": loser_file_badges,
+            "winner_tag_badges": winner_tag_badges,
+            "loser_tag_badges": loser_tag_badges,
+            "underdog_alert": underdog_alert,
+        }
+
+    def rising_star_feed(self, top_n: int = 10) -> list[tuple[str, float]]:
+        """Biggest tag mu movers so far this session, largest gain first. Recompute and call
+        this after every comparison for a live-updating feed (see summary_dashboard.py)."""
+        # trueskill_number_from_rating scales mu by MMR_SCALE; baseline was captured as a
+        # raw mu, so it's scaled the same way here before diffing.
+        deltas = [
+            (tag, trueskill_number_from_rating(rating) - self._tag_mu_baseline[tag] * MMR_SCALE)
+            for tag, rating in self.current_ratings.items()
+            if tag in self._tag_mu_baseline
+        ]
+        return sorted(deltas, key=lambda kv: kv[1], reverse=True)[:top_n]
 
     def rating_for_tag(self, tag: str) -> Rating:
         if tag not in self.current_ratings and not tag.startswith("filename:") and not is_filtered_tag(tag):
