@@ -46,6 +46,12 @@ BADGES_PATH = DATA_DIR / "badges.json"
 # (3x) so "Giant Slayer"/"Dark Horse" stay rare, per-design ask that these be hard to earn.
 UPSET_SIGMA_MULTIPLE = 3.0
 
+# Rank-percentile badges (Top Dog, Elite Eight, Precision, ...) are only meaningful once
+# there's a real pool to rank against - with a handful of entities, winning once trivially
+# puts you "in the top 20%", which is how badges ended up firing in bunches on every
+# comparison. Require at least this many rated entities before rank_pct is considered.
+MIN_POOL_FOR_RANK_BADGES = 20
+
 
 # --------------------------------------------------------------------------------------
 # Per-entity running stats (data/badge_stats.json). Updated incrementally at the moment
@@ -260,6 +266,7 @@ def record_result(
     confidence_threshold: float,
     ts: float | None = None,
     rank_pct: float | None = None,
+    pool_size: int = 0,
     upset_sigma_multiple: float | None = None,
     beat_top3: bool = False,
     is_rediscovery: bool = False,
@@ -270,6 +277,8 @@ def record_result(
     per comparison - never pass both winner and loser data into a single call.
     """
     ts = ts or time.time()
+    if pool_size < MIN_POOL_FOR_RANK_BADGES:
+        rank_pct = None
     stats_all = _load_stats()
     bucket = stats_all[entity_type + "s"]
     stats = EntityStats.from_dict(bucket.get(entity_id, {}))

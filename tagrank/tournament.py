@@ -58,6 +58,8 @@ class Tournament:
     def record_winner(self, match: Match, winner_id: int) -> None:
         match.winner_id = winner_id
         round_matches = self.rounds[match.round_index]
+        if all(m.winner_id is not None for m in round_matches):
+            self.current_round = min(match.round_index + 1, len(self.rounds) - 1)
         if match.round_index + 1 >= len(self.rounds):
             return
         next_round = self.rounds[match.round_index + 1]

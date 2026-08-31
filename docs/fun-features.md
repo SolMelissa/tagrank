@@ -132,9 +132,25 @@ Full conditions/thresholds for each: see `tagrank/badges.py`'s `TAG_BADGES` /
   picture's rating to rank against (only the active session's pool), so picture badges like
   "Top of the Pile" or "Elite Eight" are ranked within the current session's pool, not the
   whole Hydrus library. Tag rank badges use the full `data/ratings.json`, which does cover
-  every rated tag.
+  every rated tag. Rank-percentile badges only evaluate once at least 20 entities are rated
+  in the relevant pool - with fewer than that, winning even once can put you "in the top 20%"
+  by sheer scarcity, which is why they were firing in bunches before this threshold was added.
 - **`ComparisonFlowTests.test_full_pair_and_submit_flow_updates_ratings_and_writes_choices`**
   in `tests/test_service.py` fails in any environment with real `TAGRANK_MMR_SERVICE_KEY`/
   `TAGRANK_MMR_CONFIDENCE_SERVICE_KEY` values configured in `config/KEYS` — confirmed
   pre-existing on unmodified `main` with the same config, unrelated to this feature set.
   Not touched here (out of scope).
+- **Badge → Hydrus tag sync requires a new key.** Set `TAGRANK_BADGE_TAG_SERVICE_KEY` in
+  `config/KEYS` to a local tag service key to have newly-earned picture badges written to
+  Hydrus as `badge:<id>` tags. Previously the docstring claimed this synced automatically,
+  but no code actually called `client.add_tags` for badges - that's now implemented and gated
+  behind this key (defaults to internal-only, same as before, if left unset).
+- **Pairing strategies (Confidence Duel/Divergence) are still similarity-agnostic.** They
+  pair on TrueSkill sigma/mu only, not visual/tag similarity between candidates. Making the
+  "least certain" or "most contested" matchup also similarity-aware is a larger change
+  (needs a similarity signal wired into pool selection, not just pairing) and was deferred.
+- **Tournament mode has no bracket-visualization widget yet.** Progress now surfaces via the
+  window title (`Tournament: round X/Y`) and a toast after every match
+  (`Round X/Y - match N/M`), and round advancement is now tracked and displayed correctly
+  (previously `current_round` was never updated, so the title always read "round 1"). A full
+  bracket-tree view with thumbnails is a larger UI feature and was deferred.

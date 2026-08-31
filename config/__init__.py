@@ -173,6 +173,10 @@ API_KEY = FILL_ME_IN
 RATING_SERVICE_KEY = FILL_ME_IN
 TAGRANK_MMR_SERVICE_KEY = FILL_ME_IN
 TAGRANK_MMR_CONFIDENCE_SERVICE_KEY = FILL_ME_IN
+# Optional: a *local tag* service key. When set, newly-earned picture badges are
+# written to Hydrus as real tags (namespace "badge:", e.g. badge:photogenic).
+# Leave as FILL_ME_IN to keep badges internal-only (data/badges.json).
+TAGRANK_BADGE_TAG_SERVICE_KEY = FILL_ME_IN
 # =============================================================
 """
 

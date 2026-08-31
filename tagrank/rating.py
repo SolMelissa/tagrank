@@ -362,6 +362,7 @@ class RatingSystem:
             "tag", tag, won=won, mu=rating.mu, sigma=rating.sigma,
             confidence_threshold=self.settings.ui.confidence_sigma_threshold,
             rank_pct=self._tag_rank_pct(tag),
+            pool_size=len(self.current_ratings),
             upset_sigma_multiple=upset_sigma_multiple, beat_top3=beat_top3,
         )
 
@@ -369,13 +370,29 @@ class RatingSystem:
         rating = self.file_ratings.get(file_id)
         if rating is None:
             return []
-        return badges.record_result(
+        earned = badges.record_result(
             "picture", file_hash, won=won, mu=rating.mu, sigma=rating.sigma,
             confidence_threshold=self.settings.ui.confidence_sigma_threshold,
             rank_pct=self._file_rank_pct(file_id),
+            pool_size=len(self.file_ratings),
             upset_sigma_multiple=upset_sigma_multiple,
             is_rediscovery=file_id in self.pending_rediscovery_ids,
         )
+        if earned:
+            self._sync_badges_to_hydrus(file_hash, earned)
+        return earned
+
+    def _sync_badges_to_hydrus(self, file_hash: str, earned: list) -> None:
+        """Write newly-earned picture badges to Hydrus as real tags (namespace "badge:"),
+        if a local tag service key has been configured (TAGRANK_BADGE_TAG_SERVICE_KEY)."""
+        service_key = self.settings.hydrus.badge_tag_service_key
+        if not service_key or service_key == "FILL_ME_IN" or not file_hash:
+            return
+        tags = [f"badge:{badge.id}" for badge in earned]
+        try:
+            self.client.add_tags(hashes=[file_hash], service_keys_to_tags={service_key: tags})
+        except Exception as e:
+            print(f"ERROR: Could not write badge tag(s) {tags} for hash '{file_hash}': {e}")
 
     def process_result(self, *, winner: FileMetaData, loser: FileMetaData):
         winner_tags = [

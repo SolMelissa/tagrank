@@ -150,7 +150,10 @@ def build_session_summary_figures(
         counts = [date_counter[date] for date in dates]
 
         fig, ax = plt.subplots(figsize=(11, 5))
-        bars = ax.bar(dates, counts, color="#72B7B2", edgecolor="#4A8A84", linewidth=1.5)
+        x_positions = list(range(len(dates)))
+        bars = ax.bar(x_positions, counts, color="#72B7B2", edgecolor="#4A8A84", linewidth=1.5)
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(dates)
         ax.set_title("Ratings per Session Date", fontsize=12, fontweight='bold')
         ax.set_xlabel("Date", fontsize=10)
         ax.set_ylabel("Number of Comparisons", fontsize=10)

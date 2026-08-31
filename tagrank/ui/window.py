@@ -22,6 +22,7 @@ class Window(QtWidgets.QMainWindow):
         rating_system: RatingSystem,
         client: hydrus_api.Client,
         on_change: Callable[[], None] | None = None,
+        dashboard: QtWidgets.QWidget | None = None,
     ):
         super().__init__()
         self.client = client
@@ -29,11 +30,13 @@ class Window(QtWidgets.QMainWindow):
         self.right_file_metadata: FileMetaData = {}
         self.rating_system: RatingSystem = rating_system
         self.on_change = on_change
+        self.dashboard = dashboard
         self.go_back_image_pairs_stack: list[tuple[int, int]] = []
         self.comparisons = 0
         self._last_scaled_pair: tuple[int, int] | None = None
         self.active_tournament: tournament_module.Tournament | None = None
         self._pending_tournament_match: tournament_module.Match | None = None
+        self.restart_preset_id: str | None = None
         self.set_window_title_based_on_comparison_count()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
@@ -45,16 +48,13 @@ class Window(QtWidgets.QMainWindow):
 
         self._build_menu_bar()
 
-        self.badge_toast = QtWidgets.QLabel(self)
-        self.badge_toast.setStyleSheet(
+        self._toast_style = (
             "QLabel { background: rgba(30,30,30,230); color: gold; border: 1px solid gold; "
             "border-radius: 6px; padding: 6px 10px; font-weight: bold; }"
         )
-        self.badge_toast.setWordWrap(True)
-        self.badge_toast.hide()
-        self._toast_timer = QtCore.QTimer(self)
-        self._toast_timer.setSingleShot(True)
-        self._toast_timer.timeout.connect(self.badge_toast.hide)
+        self.badge_toast = self._make_toast_label()
+        self.left_toast = self._make_toast_label()
+        self.right_toast = self._make_toast_label()
 
         self.left_badge_row = QtWidgets.QWidget()
         self.right_badge_row = QtWidgets.QWidget()
@@ -222,11 +222,15 @@ class Window(QtWidgets.QMainWindow):
         self.rating_system.settings = new_settings
 
     def _show_preset_info(self, preset) -> None:
-        QtWidgets.QMessageBox.information(
-            self, preset.name,
-            f"{preset.description}\n\nStart a new session from the CLI/API with preset_id="
-            f"'{preset.id}' to use it (see docs/fun-features.md).",
-        )
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(preset.name)
+        box.setText(f"{preset.description}\n\nRestart the session now using this preset?")
+        restart_button = box.addButton("Restart with This Preset", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is restart_button:
+            self.restart_preset_id = preset.id
+            self.close()
 
     def _show_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.rating_system.settings, self)
@@ -258,29 +262,62 @@ class Window(QtWidgets.QMainWindow):
         box.setText(text)
         box.exec()
 
-    def _show_toast(self, text: str) -> None:
-        self.badge_toast.setText(text)
-        self.badge_toast.adjustSize()
-        self.badge_toast.move(
-            (self.width() - self.badge_toast.width()) // 2,
-            self.menuBar().height() + 10,
-        )
-        self.badge_toast.show()
-        self.badge_toast.raise_()
-        self._toast_timer.start(4000)
+    def _make_toast_label(self) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(self)
+        label.setStyleSheet(self._toast_style)
+        label.setWordWrap(True)
+        label.hide()
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(label.hide)
+        label._hide_timer = timer  # keep a reference alive
+        return label
 
-    def _announce_result(self, result_info: dict) -> None:
-        messages = []
+    def _show_toast(self, text: str, anchor: QtWidgets.QWidget | None = None) -> None:
+        label = self.left_toast if anchor is self.leftImageLabel else self.right_toast if anchor is self.rightImageLabel else self.badge_toast
+        label.setText(text)
+        label.adjustSize()
+        if anchor is not None:
+            anchor_topleft = anchor.mapTo(self, QtCore.QPoint(0, 0))
+            x = anchor_topleft.x() + (anchor.width() - label.width()) // 2
+            y = anchor_topleft.y() + 10
+        else:
+            x = (self.width() - label.width()) // 2
+            y = self.menuBar().height() + 10
+        x = max(0, min(x, self.width() - label.width()))
+        label.move(x, y)
+        label.show()
+        label.raise_()
+        label._hide_timer.start(4000)
+
+    def _announce_result(self, result_info: dict, winner_side: str | None = None) -> None:
+        left_messages: list[str] = []
+        right_messages: list[str] = []
+        general_messages: list[str] = []
+        winner_anchor = self.leftImageLabel if winner_side == "A" else self.rightImageLabel
+        loser_anchor = self.rightImageLabel if winner_side == "A" else self.leftImageLabel
+
+        for badge in result_info.get("winner_file_badges") or []:
+            (left_messages if winner_anchor is self.leftImageLabel else right_messages).append(
+                f"{badge.icon} {badge.name}!"
+            )
+        for badge in result_info.get("loser_file_badges") or []:
+            (left_messages if loser_anchor is self.leftImageLabel else right_messages).append(
+                f"{badge.icon} {badge.name}!"
+            )
         for tag, earned in {**result_info.get("winner_tag_badges", {}), **result_info.get("loser_tag_badges", {})}.items():
             for badge in earned:
-                messages.append(f"{badge.icon} '{tag}' earned {badge.name}!")
-        for badge in (result_info.get("winner_file_badges") or []) + (result_info.get("loser_file_badges") or []):
-            messages.append(f"{badge.icon} A picture earned {badge.name}!")
+                general_messages.append(f"{badge.icon} '{tag}' earned {badge.name}!")
         underdog = result_info.get("underdog_alert")
         if underdog is not None:
-            messages.append(f"\U0001F6A8 Underdog Alert! ({underdog['sigma_multiple']:.1f}σ upset)")
-        if messages:
-            self._show_toast("\n".join(messages))
+            general_messages.append(f"\U0001F6A8 Underdog Alert! ({underdog['sigma_multiple']:.1f}σ upset)")
+
+        if left_messages:
+            self._show_toast("\n".join(left_messages), anchor=self.leftImageLabel)
+        if right_messages:
+            self._show_toast("\n".join(right_messages), anchor=self.rightImageLabel)
+        if general_messages:
+            self._show_toast("\n".join(general_messages))
 
     def _next_pair(self) -> tuple[FileMetaData, FileMetaData] | None:
         if self.active_tournament is not None and not self.active_tournament.is_complete:
@@ -313,7 +350,8 @@ class Window(QtWidgets.QMainWindow):
         self.store_metadata_and_show_images_for_comparison_pair(pair)
 
     def set_window_title_based_on_comparison_count(self):
-        title = f"TagRank - Comparisons done this session: {self.comparisons}"
+        strategy = self.rating_system.settings.pool.pool_strategy.replace("_", " ").title()
+        title = f"TagRank - Comparisons done this session: {self.comparisons} | Strategy: {strategy}"
         if self.active_tournament is not None:
             title += f" | Tournament: round {self.active_tournament.current_round + 1}/{len(self.active_tournament.rounds)}"
         self.setWindowTitle(title)
@@ -473,9 +511,16 @@ class Window(QtWidgets.QMainWindow):
                 if self.active_tournament.is_complete:
                     tournament_module.finish_tournament(self.active_tournament)
                     self._show_toast(f"\U0001F3C6 Tournament complete! Champion crowned.")
+                else:
+                    round_matches = self.active_tournament.rounds[self.active_tournament.current_round]
+                    done = sum(1 for m in round_matches if m.winner_id is not None)
+                    self._show_toast(
+                        f"\U0001F3C6 Round {self.active_tournament.current_round + 1}/"
+                        f"{len(self.active_tournament.rounds)} - match {done}/{len(round_matches)}"
+                    )
 
             self.set_window_title_based_on_comparison_count()
-            self._announce_result(self.rating_system.last_result_info)
+            self._announce_result(self.rating_system.last_result_info, winner_side=winner_side)
         except Exception as e:
             print(f"ERROR: tournament/badge bookkeeping failed (comparison still recorded): {e}")
 
@@ -500,6 +545,8 @@ class Window(QtWidgets.QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.prepare_to_quit()
+        if self.dashboard is not None:
+            self.dashboard.close()
 
     def prepare_to_quit(self):
         print("Saving results to file...")

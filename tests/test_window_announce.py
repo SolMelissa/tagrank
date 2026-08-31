@@ -13,9 +13,19 @@ class AnnounceResultTests(unittest.TestCase):
     aborts everything after the crash point, including advancing to the next comparison pair
     (the comparison count still increments since that happens earlier in the handler)."""
 
+    @staticmethod
+    def _fake_window(toasts):
+        left_label = object()
+        right_label = object()
+        return SimpleNamespace(
+            _show_toast=lambda text, anchor=None: toasts.append(text),
+            leftImageLabel=left_label,
+            rightImageLabel=right_label,
+        )
+
     def test_flat_picture_badge_list_does_not_raise(self):
         toasts = []
-        fake_self = SimpleNamespace(_show_toast=lambda text: toasts.append(text))
+        fake_self = self._fake_window(toasts)
         earned_badge = next(iter(BADGE_BY_ID.values()))
         result_info = {
             "winner_tag_badges": {},
@@ -25,14 +35,14 @@ class AnnounceResultTests(unittest.TestCase):
             "underdog_alert": None,
         }
 
-        Window._announce_result(fake_self, result_info)
+        Window._announce_result(fake_self, result_info, winner_side="A")
 
         self.assertEqual(len(toasts), 1)
         self.assertIn(earned_badge.name, toasts[0])
 
     def test_empty_result_info_produces_no_toast(self):
         toasts = []
-        fake_self = SimpleNamespace(_show_toast=lambda text: toasts.append(text))
+        fake_self = self._fake_window(toasts)
 
         Window._announce_result(fake_self, {})
 

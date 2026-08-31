@@ -20,6 +20,7 @@ class HydrusKeys:
     rating_service_key: str
     mmr_service_key: str
     mmr_confidence_service_key: str
+    badge_tag_service_key: str
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def load_settings() -> Settings:
             rating_service_key=key("RATING_SERVICE_KEY").strip(),
             mmr_service_key=key("TAGRANK_MMR_SERVICE_KEY", "").strip(),
             mmr_confidence_service_key=key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip(),
+            badge_tag_service_key=key("TAGRANK_BADGE_TAG_SERVICE_KEY", "").strip(),
         ),
         search=SearchSettings(
             search_query=get_list("SEARCH_QUERY", []),
