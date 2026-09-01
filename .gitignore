@@ -14,3 +14,4 @@ bash.exe.stackdump
 # Raw icon-pack drop (8000+ files); only the ~60 icons actually used are committed,
 # under tagrank/ui/assets/badges/.
 etc/icons/
+config/SETTINGS

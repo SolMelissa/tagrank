@@ -49,7 +49,7 @@ API_LIMIT_FUZZ = 1
 POOL_STRATEGY = confidence_duel
 
 # MAX_TOURNAMENT_SIZE: max images randomly drawn into a Tournament Mode bracket.
-MAX_TOURNAMENT_SIZE = 64
+MAX_TOURNAMENT_SIZE = 32
 
 # ====================== DISTANCE ESCALATION ======================
 # These settings control how far the search is allowed to drift when the initial
@@ -79,7 +79,7 @@ MAX_DISTANCE_HARD = 20
 # but they can accept weaker or more tenuous matches. Reasonable range: 50-100; comfortable
 # default: 100 for a strict pool, or 75 if you prefer faster but looser results.
 #
-MIN_POOL_SATISFIED = 100
+MIN_POOL_SATISFIED = 100.0
 
 # ====================== UI / MISC ======================
 # These settings control how many tags are offered in the interactive search picker
@@ -124,7 +124,7 @@ CONFIDENCE_SIGMA_THRESHOLD = 3.0
 # RISING_STAR_FEED_ENABLED / UNDERDOG_ALERTS_ENABLED: toggle the live biggest-mover
 # leaderboard and upset notifications during a session.
 RISING_STAR_FEED_ENABLED = True
-UNDERDOG_ALERTS_ENABLED = True
+UNDERDOG_ALERTS_ENABLED = False
 
 DEBUG_MODE = True
 # =============================================================
