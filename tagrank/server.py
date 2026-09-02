@@ -73,6 +73,7 @@ class StartSessionRequest(BaseModel):
     pool_size: int | None = Field(default=None, description="Override the configured POOL_SIZE for this session.")
     preset_id: str | None = Field(default=None, description="A Mood/Theme preset id from GET /presets. Explicit query/pool_size/pool_strategy still take priority.")
     pool_strategy: str | None = Field(default=None, description="top | random | bottom | confidence_duel | divergence. Overrides the configured POOL_STRATEGY for this session.")
+    use_similarity: bool = Field(default=True, description="Whether to expand the pool via Hydrus visual-similarity search (slower - a distance search per seed hash) instead of a plain tag search randomly sampled to pool_size.")
 
 
 class SettingsPatchRequest(BaseModel):
@@ -220,10 +221,13 @@ _jobs: dict[str, JobStatus] = {}
 
 def _run_start_session(
     job_id: str, query: list[str] | None, pool_size: int | None,
-    preset_id: str | None = None, pool_strategy: str | None = None,
+    preset_id: str | None = None, pool_strategy: str | None = None, use_similarity: bool = True,
 ) -> None:
     try:
-        session = service.start_session(query=query, pool_size=pool_size, preset_id=preset_id, pool_strategy=pool_strategy)
+        session = service.start_session(
+            query=query, pool_size=pool_size, preset_id=preset_id, pool_strategy=pool_strategy,
+            use_similarity=use_similarity,
+        )
         _jobs[job_id] = JobStatus(job_id=job_id, status="ready", session_id=session.id)
     except TagRankError as e:
         _jobs[job_id] = JobStatus(job_id=job_id, status="error", error=str(e))
@@ -244,7 +248,7 @@ async def create_session(request: StartSessionRequest) -> JobStatus:
     loop = asyncio.get_running_loop()
     loop.run_in_executor(
         None, _run_start_session, job_id, request.query, request.pool_size,
-        request.preset_id, request.pool_strategy,
+        request.preset_id, request.pool_strategy, request.use_similarity,
     )
     return _jobs[job_id]
 

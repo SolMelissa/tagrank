@@ -66,6 +66,7 @@ def start_session(
     client: hydrus_api.Client | None = None,
     preset_id: str | None = None,
     pool_strategy: str | None = None,
+    use_similarity: bool = True,
 ) -> Session:
     """Build a comparison pool and RatingSystem, exactly like app.run_for_rank_tags does before
     it opens the GUI window. Raises NoRelevantFilesError / FileInformationError on failure.
@@ -97,9 +98,9 @@ def start_session(
 
     file_service_key = settings.pool.file_service_key
     hashes = (
-        pool.build_pool(client=client, query=query, pool_size=pool_size, file_service_key=file_service_key)
+        pool.build_pool(client=client, query=query, pool_size=pool_size, file_service_key=file_service_key, use_similarity=use_similarity)
         if pool_size
-        else pool.build_pool(client=client, query=query, file_service_key=file_service_key)
+        else pool.build_pool(client=client, query=query, file_service_key=file_service_key, use_similarity=use_similarity)
     )
     if not hashes:
         raise NoRelevantFilesError(query or [])
