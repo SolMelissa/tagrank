@@ -68,6 +68,9 @@ def run_for_rank_tags(client, settings: Settings, preset_tag: str | None = None)
         print(f"         The exact path is: {files_path_path.resolve()}")
 
     from tagrank.pool import build_pool, prompt_for_search
+    from tagrank.presets import get_preset
+
+    app = QtWidgets.QApplication(sys.argv)
     if preset_tag is not None:
         # Caller (e.g. Undertow's TagRank tab) already picked the tag from its own copy of the
         # Top/Random/Bottom list - skip the interactive numbered-menu prompt entirely.
@@ -75,42 +78,68 @@ def run_for_rank_tags(client, settings: Settings, preset_tag: str | None = None)
         query = [preset_tag]
     else:
         query = prompt_for_search(client)  # numbered most-liked tags, 0 = custom search
-    hashes = build_pool(client=client, query=query, file_service_key=settings.pool.file_service_key)
-    if not hashes:
-        print_no_relevant_files_then_exit(query)
+    preset_id: str | None = None
+    window: Window | None = None
 
-    metadata_response = client.get_file_metadata(hashes=hashes)
-    if metadata_response is None or metadata_response.get("metadata") is None:
-        print_could_not_fetch_file_information_then_exit()
+    while True:
+        effective_query = query
+        pool_size_override = None
+        if preset_id is not None:
+            preset = get_preset(preset_id)
+            if preset is not None:
+                if preset.query:
+                    effective_query = preset.query
+                if preset.pool_size:
+                    pool_size_override = preset.pool_size
+                if preset.pool_strategy:
+                    from tagrank.settings import get_settings_store
+                    get_settings_store().update({"pool.pool_strategy": preset.pool_strategy})
 
-    ids = [int(meta["file_id"]) for meta in metadata_response["metadata"] if "file_id" in meta]
+        pool_kwargs = {"client": client, "query": effective_query}
+        if pool_size_override:
+            pool_kwargs["pool_size"] = pool_size_override
+        hashes = build_pool(**pool_kwargs)
+        if not hashes:
+            print_no_relevant_files_then_exit(effective_query)
 
-    if len(ids) < 2:
-        print_no_relevant_files_then_exit(query)
+        metadata_response = client.get_file_metadata(hashes=hashes)
+        if metadata_response is None or metadata_response.get("metadata") is None:
+            print_could_not_fetch_file_information_then_exit()
 
-    app = QtWidgets.QApplication(sys.argv)
-    rating_system = RatingSystem(client, ids, settings)
+        ids = [int(meta["file_id"]) for meta in metadata_response["metadata"] if "file_id" in meta]
 
-    dashboard = SummaryDashboard(rating_system, settings.ui.amount_of_tags_in_charts)
-    window: Window = Window(rating_system, client, on_change=dashboard.refresh)
+        if len(ids) < 2:
+            print_no_relevant_files_then_exit(effective_query)
 
-    window.show()
-    screen_geometry = window.screen().availableGeometry() if window.screen() else None
-    if screen_geometry is not None:
-        window.setGeometry(
-            screen_geometry.x(), screen_geometry.y(),
-            screen_geometry.width() * 3 // 5, screen_geometry.height()
-        )
-        dashboard.setGeometry(
-            screen_geometry.x() + screen_geometry.width() * 3 // 5, screen_geometry.y(),
-            screen_geometry.width() * 2 // 5, screen_geometry.height()
-        )
-    dashboard.show()
+        rating_system = RatingSystem(client, ids, load_settings())
 
-    first_section_result = app.exec()
-    if first_section_result != 0:
-        print("Comparison app closed in error. Not moving on to comparisons.")
-        sys.exit(first_section_result)
+        dashboard = SummaryDashboard(rating_system, settings.ui.amount_of_tags_in_charts)
+        window = Window(rating_system, client, on_change=dashboard.refresh, dashboard=dashboard)
+
+        window.show()
+        screen_geometry = window.screen().availableGeometry() if window.screen() else None
+        if screen_geometry is not None:
+            window.setGeometry(
+                screen_geometry.x(), screen_geometry.y(),
+                screen_geometry.width() * 3 // 5, screen_geometry.height()
+            )
+            dashboard.setGeometry(
+                screen_geometry.x() + screen_geometry.width() * 3 // 5, screen_geometry.y(),
+                screen_geometry.width() * 2 // 5, screen_geometry.height()
+            )
+        dashboard.show()
+
+        first_section_result = app.exec()
+        if first_section_result != 0:
+            print("Comparison app closed in error. Not moving on to comparisons.")
+            sys.exit(first_section_result)
+
+        if window.restart_preset_id is not None:
+            preset_id = window.restart_preset_id
+            window.destroy()
+            continue
+        break
+
     window.destroy()
 
     many_tags: list[tuple[str, Rating]] = top_tags_from_rating_system(rating_system, settings.ui.amount_of_tags_in_charts)

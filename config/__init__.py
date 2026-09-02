@@ -206,9 +206,10 @@ TAGRANK_MMR_CONFIDENCE_SERVICE_KEY = FILL_ME_IN
 # sibling side by side. Find the key under services -> review services -> the service's tab.
 TAG_SERVICE_KEY = FILL_ME_IN
 # Local tag service TagRank writes its own badges (TagRankSort:N sort tags) and MMR-derived
-# tags to. Leave FILL_ME_IN (or blank) to fall back to TAG_SERVICE_KEY, then "my tags" - set
-# this to a dedicated local tag service (e.g. "tagrank badges") to keep TagRank's own bookkeeping
-# tags out of your real tag service.
+# tags to, and where newly-earned picture badges are written as real tags (namespace "badge:",
+# e.g. badge:photogenic). Leave FILL_ME_IN (or blank) to fall back to TAG_SERVICE_KEY, then
+# "my tags" - set this to a dedicated local tag service (e.g. "tagrank badges") to keep
+# TagRank's own bookkeeping tags out of your real tag service.
 TAGRANK_BADGE_TAG_SERVICE_KEY = FILL_ME_IN
 # =============================================================
 """

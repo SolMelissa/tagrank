@@ -28,7 +28,7 @@ class HydrusKeys:
     mmr_service_key: str
     mmr_confidence_service_key: str
     tag_service_key: str
-    badge_tag_service_key: str  # where TagRankSort:N + MMR tags get written; "" = tag_service_key, then "my tags"
+    badge_tag_service_key: str  # where TagRankSort:N + MMR tags + badges get written; "" = tag_service_key, then "my tags"
 
 
 @dataclass(frozen=True)
