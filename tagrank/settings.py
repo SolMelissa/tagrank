@@ -152,7 +152,6 @@ def load_settings() -> Settings:
 # service identifiers, not real secrets, but live alongside API_KEY/RATING_SERVICE_KEY for
 # historical reasons.
 _SETTINGS_KEYS: dict[str, str] = {
-    "hydrus.tag_service_key": "TAG_SERVICE_KEY",
     "hydrus.badge_tag_service_key": "TAGRANK_BADGE_TAG_SERVICE_KEY",
     "pool.pool_size": "POOL_SIZE",
     "pool.candidate_seed_count": "CANDIDATE_SEED_COUNT",

@@ -352,11 +352,11 @@ def history_graph_png(index: int) -> Response:
 def get_settings() -> dict[str, Any]:
     settings = service.get_settings()
     return {
-        # Only the two hydrus.* fields that are Hydrus service identifiers, not the real
-        # secrets (api_key, rating/mmr service keys) also stored on settings.hydrus - those
-        # never leave the process, even over this localhost-only API.
+        # Only badge_tag_service_key - not tag_service_key (that one isn't user-editable
+        # through this API by design) and not the real secrets (api_key, rating/mmr service
+        # keys) also stored on settings.hydrus, which never leave the process even over this
+        # localhost-only API.
         "hydrus": {
-            "tag_service_key": settings.hydrus.tag_service_key,
             "badge_tag_service_key": settings.hydrus.badge_tag_service_key,
         },
         "search": asdict(settings.search),
@@ -370,11 +370,11 @@ def get_settings() -> dict[str, Any]:
 def patch_settings(request: SettingsPatchRequest) -> dict[str, Any]:
     settings = service.patch_settings(request.changes)
     return {
-        # Only the two hydrus.* fields that are Hydrus service identifiers, not the real
-        # secrets (api_key, rating/mmr service keys) also stored on settings.hydrus - those
-        # never leave the process, even over this localhost-only API.
+        # Only badge_tag_service_key - not tag_service_key (that one isn't user-editable
+        # through this API by design) and not the real secrets (api_key, rating/mmr service
+        # keys) also stored on settings.hydrus, which never leave the process even over this
+        # localhost-only API.
         "hydrus": {
-            "tag_service_key": settings.hydrus.tag_service_key,
             "badge_tag_service_key": settings.hydrus.badge_tag_service_key,
         },
         "search": asdict(settings.search),
