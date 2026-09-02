@@ -4,7 +4,8 @@
 `python main.py --serve [--port N]` (headless HTTP API, see docs/api.md), or
 `python main.py --tag <tag>` (rank tags, skipping the interactive search picker in favor of
 that one tag - for external launchers, e.g. Undertow's TagRank tab, that already know which
-tag they want)."""
+tag they want). Add `--no-similarity` to skip the visual-similarity pool expansion and use a
+plain tag search instead (much faster; Undertow's TagRank tab passes this by default)."""
 
 import sys
 
@@ -31,4 +32,6 @@ if __name__ == "__main__":
         if tag_index + 1 < len(arguments):
             preset_tag = arguments[tag_index + 1]
 
-    main(mode, port=port, preset_tag=preset_tag)
+    use_similarity = "--no-similarity" not in arguments
+
+    main(mode, port=port, preset_tag=preset_tag, use_similarity=use_similarity)

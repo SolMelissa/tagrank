@@ -427,11 +427,28 @@ def get_candidate_seeds(query: list[str], n: int, client: hydrus_api.Client, fil
 def build_pool(client: hydrus_api.Client | None = None,
                pool_size: int = POOL_SIZE,
                query: list[str] | None = None,
-               file_service_key: str = FILE_SERVICE_KEY) -> list[str]:
+               file_service_key: str = FILE_SERVICE_KEY,
+               use_similarity: bool = True) -> list[str]:
     client = client or _get_default_client()
     if query is None:
         query = _legacy_seed_predicates()
     search_kwargs = {"file_service_keys": [file_service_key]} if file_service_key else {}
+
+    # Similarity search (below) is the slow part - it does a distance-expanding search per
+    # seed hash, each a separate Hydrus round-trip. When the caller doesn't need visually-
+    # similar neighbors (e.g. Undertow's "Similarity" filter toggle, off by default), skip
+    # straight to a plain tag search and randomly sample it down to pool_size instead.
+    if not use_similarity:
+        try:
+            resp = client.search_files(query, return_hashes=True, **search_kwargs)
+            hashes = list(resp.get("hashes") or [])
+        except Exception as e:
+            logger.error(f"Direct search (similarity disabled) failed: {e}")
+            return []
+        if len(hashes) > pool_size:
+            hashes = random.sample(hashes, pool_size)
+        logger.info(f"Similarity disabled: using {len(hashes)} file(s) from a direct tag search.")
+        return hashes
 
     logger.info(f"Building pool of {pool_size} files (starting distance: {MAX_DISTANCE_START}, max: {MAX_DISTANCE_HARD})...")
 
