@@ -10,7 +10,14 @@ from PySide6.QtGui import Qt
 
 from tagrank import badges, tournament as tournament_module
 from tagrank.presets import load_presets
-from tagrank.rating import FileMetaData, RatingSystem, average_tag_confidence, file_tag_text, format_comparison_label
+from tagrank.rating import (
+    FileMetaData,
+    RatingSystem,
+    average_tag_confidence,
+    file_tag_text,
+    format_comparison_label,
+    tags_from_file,
+)
 from tagrank.pool import write_choice
 from tagrank.settings import POOL_STRATEGIES, get_settings_store
 from tagrank.ui.settings_dialog import SettingsDialog
@@ -56,15 +63,19 @@ class Window(QtWidgets.QMainWindow):
         self.left_toast = self._make_toast_label()
         self.right_toast = self._make_toast_label()
 
-        self.left_badge_row = QtWidgets.QWidget()
-        self.right_badge_row = QtWidgets.QWidget()
-        self.left_badge_layout = QtWidgets.QHBoxLayout(self.left_badge_row)
-        self.right_badge_layout = QtWidgets.QHBoxLayout(self.right_badge_row)
-        for badge_layout in (self.left_badge_layout, self.right_badge_layout):
-            badge_layout.setContentsMargins(0, 2, 0, 2)
-            badge_layout.setSpacing(4)
-            badge_layout.addStretch(1)
-            badge_layout.addStretch(1)
+        # Per-picture overlay children (corner badge pill + top tag-pill band), rebuilt fresh
+        # each round in refresh_comparison_details() / _reposition_picture_overlays(). Parented
+        # directly to the image QLabel so their coordinates are local to the image, not the
+        # window - no mapTo() bookkeeping needed, they just ride along with the label.
+        self._left_badge_pill: QtWidgets.QLabel | None = None
+        self._right_badge_pill: QtWidgets.QLabel | None = None
+        self._left_tags_widget: QtWidgets.QWidget | None = None
+        self._right_tags_widget: QtWidgets.QWidget | None = None
+        self._tag_pill_style = (
+            "QLabel { background: rgba(15,15,18,195); color: #f5f0fa; border: 1px solid rgba(255,255,255,90); "
+            "border-radius: 8px; padding: 2px 8px; font-size: 8pt; }"
+        )
+        self._TAG_PILL_MAX_SHOWN = 12
 
         self.comparison_surface = QtWidgets.QWidget()
         self.comparison_layout = QtWidgets.QStackedLayout(self.comparison_surface)
@@ -89,10 +100,8 @@ class Window(QtWidgets.QMainWindow):
         self.rightImageLabel.setStyleSheet("QLabel { background: black; }")
         left_column = QtWidgets.QVBoxLayout()
         left_column.addWidget(self.leftImageLabel, 1)
-        left_column.addWidget(self.left_badge_row, 0)
         right_column = QtWidgets.QVBoxLayout()
         right_column.addWidget(self.rightImageLabel, 1)
-        right_column.addWidget(self.right_badge_row, 0)
         self.image_layout.addLayout(left_column, 1)
         self.image_layout.addLayout(right_column, 1)
         for label in [self.leftImageLabel, self.rightImageLabel]:
@@ -356,32 +365,102 @@ class Window(QtWidgets.QMainWindow):
             title += f" | Tournament: round {self.active_tournament.current_round + 1}/{len(self.active_tournament.rounds)}"
         self.setWindowTitle(title)
 
-    def _render_badge_strip(self, layout: QtWidgets.QHBoxLayout, entity_type: str, entity_id: str) -> None:
-        """Repopulate `layout` with one icon widget per earned badge (real SVG icon from
-        game-icons.net, falling back to the badge's emoji if the file can't be loaded), each
-        with a tooltip showing the badge's name and description."""
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+    def _replace_overlay_child(self, old: QtWidgets.QWidget | None, new: QtWidgets.QWidget | None) -> QtWidgets.QWidget | None:
+        """Swap out a per-round overlay child widget, cleaning up the old one."""
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
+        return new
 
-        layout.addStretch(1)
-        for badge_id in sorted(badges.held_badge_ids(entity_type, entity_id)):
-            badge = badges.BADGE_BY_ID.get(badge_id)
-            if badge is None:
-                continue
-            icon_label = QtWidgets.QLabel()
-            pixmap = QtGui.QIcon(str(badges.icon_path(badge_id))).pixmap(24, 24)
-            if pixmap.isNull():
-                icon_label.setText(badge.icon)
-            else:
-                icon_label.setPixmap(pixmap)
-            icon_label.setToolTip(f"{badge.icon} {badge.name}\n{badge.description}")
-            icon_label.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-            layout.addWidget(icon_label)
-        layout.addStretch(1)
+    def _build_badge_pill(self, parent: QtWidgets.QWidget, badge_id: str) -> QtWidgets.QLabel | None:
+        """A single rounded pill for one badge, colored/bordered by its difficulty tier
+        (common=grey, rare=blue, epic=purple, legendary=gold with a heavier border for glow)."""
+        badge = badges.BADGE_BY_ID.get(badge_id)
+        if badge is None:
+            return None
+        colors = badges.DIFFICULTY_COLORS[badge.difficulty]
+        pill = QtWidgets.QLabel(f"{badge.icon} {badge.name}", parent)
+        pill.setToolTip(f"{badge.icon} {badge.name} — {badge.difficulty.title()}\n{badge.description}")
+        border_width = "2px" if badge.difficulty == "legendary" else "1px"
+        pill.setStyleSheet(
+            f"QLabel {{ background: {colors['bg']}; color: {colors['text']}; "
+            f"border: {border_width} solid {colors['border']}; border-radius: 9px; "
+            f"padding: 3px 9px; font-size: 8.5pt; font-weight: bold; }}"
+        )
+        pill.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        pill.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        pill.adjustSize()
+        return pill
+
+    def _make_badge_pill_for(self, parent: QtWidgets.QWidget, entity_id: str | None) -> QtWidgets.QLabel | None:
+        """The single rarest-held picture badge for this entity, or None if it holds none."""
+        if not entity_id:
+            return None
+        badge_id = badges.rarest_badge_id("picture", entity_id)
+        if badge_id is None:
+            return None
+        return self._build_badge_pill(parent, badge_id)
+
+    def _build_tag_pill_row(self, parent: QtWidgets.QWidget, tags: list[str], max_width: int) -> QtWidgets.QWidget:
+        """A horizontally-wrapped block of tag pills, capped at _TAG_PILL_MAX_SHOWN with a
+        '+N more' pill for the rest, greedily wrapped into centered rows within max_width."""
+        container = QtWidgets.QWidget(parent)
+        container.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        outer = QtWidgets.QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(3)
+
+        shown = tags[: self._TAG_PILL_MAX_SHOWN]
+        remaining = len(tags) - len(shown)
+        pill_texts = list(shown)
+        if remaining > 0:
+            pill_texts.append(f"+{remaining} more")
+
+        metrics = QtGui.QFontMetrics(container.font())
+        spacing = 4
+        max_width = max(max_width, 80)
+        row_layout: QtWidgets.QHBoxLayout | None = None
+        row_width = 0
+        for text in pill_texts:
+            pill_width = metrics.horizontalAdvance(text) + 18
+            if row_layout is None or row_width + pill_width + spacing > max_width:
+                row_widget = QtWidgets.QWidget(container)
+                row_layout = QtWidgets.QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(spacing)
+                outer.addWidget(row_widget)
+                outer.setAlignment(row_widget, QtCore.Qt.AlignmentFlag.AlignHCenter)
+                row_width = 0
+            label = QtWidgets.QLabel(text)
+            label.setStyleSheet(self._tag_pill_style)
+            label.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            row_layout.addWidget(label)
+            row_width += pill_width + spacing
+        container.adjustSize()
+        return container
+
+    def _reposition_picture_overlays(self) -> None:
+        """Pin each side's badge pill to its outward-facing top corner (left picture -> its
+        own top-left; right picture -> its own top-right, i.e. away from the shared middle of
+        the screen) and its tag-pill band centered along the top, stacked just below the badge
+        so the two never overlap."""
+        margin = 8
+        for label, badge_pill, tags_widget, is_left in (
+            (self.leftImageLabel, self._left_badge_pill, self._left_tags_widget, True),
+            (self.rightImageLabel, self._right_badge_pill, self._right_tags_widget, False),
+        ):
+            top_y = margin
+            if badge_pill is not None:
+                bx = margin if is_left else max(margin, label.width() - badge_pill.width() - margin)
+                badge_pill.move(bx, margin)
+                badge_pill.show()
+                badge_pill.raise_()
+                top_y = margin + badge_pill.height() + 4
+            if tags_widget is not None:
+                tx = max(margin, (label.width() - tags_widget.width()) // 2)
+                tags_widget.move(tx, top_y)
+                tags_widget.show()
+                tags_widget.raise_()
 
     def refresh_comparison_details(self):
         left_tags = file_tag_text(self.left_file_metadata, self.rating_system)
@@ -391,8 +470,25 @@ class Window(QtWidgets.QMainWindow):
 
         left_hash = self.left_file_metadata.get("hash")
         right_hash = self.right_file_metadata.get("hash")
-        self._render_badge_strip(self.left_badge_layout, "picture", left_hash or "")
-        self._render_badge_strip(self.right_badge_layout, "picture", right_hash or "")
+
+        self._left_badge_pill = self._replace_overlay_child(
+            self._left_badge_pill, self._make_badge_pill_for(self.leftImageLabel, left_hash)
+        )
+        self._right_badge_pill = self._replace_overlay_child(
+            self._right_badge_pill, self._make_badge_pill_for(self.rightImageLabel, right_hash)
+        )
+
+        left_raw_tags = sorted(tags_from_file(self.left_file_metadata)) if self.left_file_metadata else []
+        right_raw_tags = sorted(tags_from_file(self.right_file_metadata)) if self.right_file_metadata else []
+        self._left_tags_widget = self._replace_overlay_child(
+            self._left_tags_widget,
+            self._build_tag_pill_row(self.leftImageLabel, left_raw_tags, int(self.leftImageLabel.width() * 0.72)),
+        )
+        self._right_tags_widget = self._replace_overlay_child(
+            self._right_tags_widget,
+            self._build_tag_pill_row(self.rightImageLabel, right_raw_tags, int(self.rightImageLabel.width() * 0.72)),
+        )
+        self._reposition_picture_overlays()
 
         left_photo_score = self.rating_system.file_score(self.left_file_metadata)
         right_photo_score = self.rating_system.file_score(self.right_file_metadata)
@@ -442,6 +538,7 @@ class Window(QtWidgets.QMainWindow):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         if self.left_file_metadata and self.right_file_metadata:
             self.apply_image_pair_pixmaps()
+            self._reposition_picture_overlays()
 
     def process_undo(self):
         try:

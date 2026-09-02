@@ -38,8 +38,17 @@ never accidentally also earn a tag badge.
   with a tooltip giving the badge's name and description. A Unicode emoji is kept per badge
   too, for plain-text contexts (toasts, the preset info box) where loading an image isn't
   worth it.
-- GUI: badge icons render live under each compared picture; **View → View Badges...** lists
-  everything earned so far.
+- Difficulty tiers: every badge is tagged `common` / `rare` / `epic` / `legendary`
+  (`BadgeDef.difficulty`, required on every entry) based on how hard its condition is to
+  reach — see `tagrank/badges.py`'s `DIFFICULTY_COLORS` for the tier→color mapping used by
+  the GUI pill styling.
+- GUI: each compared picture shows at most one badge on screen at a time, as a colored pill
+  overlaid in that picture's own outward top corner (left picture → its top-left corner,
+  right picture → its top-right corner) — the *rarest* badge it currently holds, picked via
+  `badges.rarest_badge_id()` (lowest global earn-count across all pictures holding that
+  badge; ties break toward the higher difficulty tier). Its Hydrus tags render as a wrapped
+  band of pills along the top-center of the same picture, capped with a "+N more" pill.
+  **View → View Badges...** still lists everything ever earned, across all tiers.
 - API: `GET /badges`.
 - Implementation: `tagrank/badges.py`.
 

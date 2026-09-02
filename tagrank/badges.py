@@ -37,6 +37,7 @@ def icon_path(badge_id: str) -> Path:
     return ASSETS_DIR / f"{badge_id}.svg"
 
 EntityType = Literal["tag", "picture"]
+Difficulty = Literal["common", "rare", "epic", "legendary"]
 
 STATS_PATH = DATA_DIR / "badge_stats.json"
 BADGES_PATH = DATA_DIR / "badges.json"
@@ -127,6 +128,14 @@ class BadgeDef:
     entity_type: EntityType
     description: str
     condition: Callable[["BadgeContext"], bool]
+    # Rarity tier, required on every entry (no default) so a new badge can't be added without
+    # deliberately picking one. Roughly: common = trivially reachable early on (total>=1,
+    # streak>=5, sigma just crossing the confidence threshold); rare = a modest sustained
+    # effort (streak>=10-15, total>=20-50, 80% win rate); epic = a real grind or a hard
+    # condition (total>=100-150, streak>=15-20, beating a top-3 opponent, a 3-sigma upset);
+    # legendary = top of the scale / effectively best-in-pool (total>=200, streak>=20,
+    # rank_pct>=0.999, "awarded manually", or stacking several other badges as a prereq).
+    difficulty: Difficulty
 
 
 @dataclass
@@ -147,70 +156,106 @@ def _confident(ctx: BadgeContext) -> bool:
 
 
 TAG_BADGES: list[BadgeDef] = [
-    BadgeDef("first_blood", "First Blood", "🩸", "tag", "First-ever win", lambda c: c.stats.wins >= 1),
-    BadgeDef("on_a_roll", "On a Roll", "🔥", "tag", "5-win streak", lambda c: c.stats.streak >= 5),
-    BadgeDef("unstoppable", "Unstoppable", "🌪️", "tag", "10-win streak", lambda c: c.stats.streak >= 10),
-    BadgeDef("iron_tag", "Iron Tag", "🛡️", "tag", "50 total comparisons survived", lambda c: c.stats.total >= 50),
-    BadgeDef("crowd_favorite", "Crowd Favorite", "⭐", "tag", "mu crosses a high absolute threshold", lambda c: c.mu >= 35.0),
-    BadgeDef("rock_solid", "Rock Solid", "🪨", "tag", "sigma drops below the confidence threshold", _confident),
-    BadgeDef("giant_slayer", "Giant Slayer", "⚔️", "tag", "Beat a tag rated 2+ tiers higher", lambda c: (c.upset_sigma_multiple or 0) >= UPSET_SIGMA_MULTIPLE),
-    BadgeDef("comeback_kid", "Comeback Kid", "🔁", "tag", "3-loss streak recovered into a 3-win streak", lambda c: c.stats.prev_streak <= -3 and c.stats.streak >= 3),
-    BadgeDef("century_club", "Century Club", "💯", "tag", "100 total comparisons", lambda c: c.stats.total >= 100),
-    BadgeDef("undefeated_debut", "Undefeated Debut", "🎬", "tag", "Wins its first 5 comparisons in a row", lambda c: c.stats.total >= 5 and c.stats.losses == 0 and c.stats.streak >= 5),
-    BadgeDef("marathoner", "Marathoner", "🏃", "tag", "200 total comparisons", lambda c: c.stats.total >= 200),
-    BadgeDef("untouchable", "Untouchable", "🧊", "tag", "15-win streak", lambda c: c.stats.streak >= 15),
-    BadgeDef("legendary", "Legendary", "🐉", "tag", "20-win streak", lambda c: c.stats.streak >= 20),
-    BadgeDef("top_dog", "Top Dog", "🐕", "tag", "Reaches #1 mu rank in its pool", lambda c: c.rank_pct is not None and c.rank_pct >= 0.999),
-    BadgeDef("elite_eight", "Elite Eight", "8️⃣", "tag", "Reaches top 8 by mu", lambda c: c.rank_pct is not None and c.rank_pct >= 0.9),
-    BadgeDef("sharpshooter", "Sharpshooter", "🎯", "tag", "80%+ win rate over its last 20 comparisons", lambda c: len(c.stats.last20) >= 20 and sum(c.stats.last20) / len(c.stats.last20) >= 0.8),
-    BadgeDef("slow_burn", "Slow Burn", "🕯️", "tag", "Reaches Rock Solid confidence only after 150+ comparisons", lambda c: _confident(c) and c.stats.total >= 150),
-    BadgeDef("fast_riser", "Fast Riser", "🚀", "tag", "Reaches Rock Solid confidence in under 30 comparisons", lambda c: _confident(c) and c.stats.total < 30),
-    BadgeDef("redemption_arc", "Redemption Arc", "🌅", "tag", "5-loss streak recovered into a 5-win streak", lambda c: c.stats.prev_streak <= -5 and c.stats.streak >= 5),
-    BadgeDef("battle_scarred", "Battle Scarred", "🩹", "tag", "Survives 20 losses, still net-positive record", lambda c: c.stats.losses >= 20 and c.stats.wins > c.stats.losses),
-    BadgeDef("overachiever", "Overachiever", "📈", "tag", "mu exceeds its own first-20-comparison baseline by a large margin", lambda c: c.stats.baseline_mu is not None and c.mu - c.stats.baseline_mu >= 10.0),
-    BadgeDef("consistency_king", "Consistency King", "👑", "tag", "sigma stays below the confidence threshold continuously across 100+ comparisons", lambda c: _confident(c) and c.stats.confidence_since is not None and c.stats.total >= 100),
-    BadgeDef("giant_slayer_ii", "Giant Slayer II", "🗡️", "tag", "Beats a top-3 ranked tag at least once", lambda c: c.beat_top3),
-    BadgeDef("ironclad", "Ironclad", "⛓️", "tag", "Never drops below a positive record after its first 20 comparisons", lambda c: c.stats.total >= 20 and c.stats.wins > c.stats.losses),
-    BadgeDef("dark_horse_tag", "Dark Horse Tag", "🐴", "tag", "Starts with a loss but finishes in the top 10", lambda c: c.stats.total >= 1 and not c.stats.last20[:1] == [True] and c.rank_pct is not None and c.rank_pct >= 0.8),
-    BadgeDef("streak_breaker", "Streak Breaker", "✂️", "tag", "Ends another tag's active 5+ win streak", lambda c: (c.upset_sigma_multiple or 0) > 0 and c.stats.streak >= 1),
-    BadgeDef("halfway_hero", "Halfway Hero", "🏁", "tag", "Reaches 50 comparisons with a winning record", lambda c: c.stats.total >= 50 and c.stats.wins > c.stats.losses),
-    BadgeDef("grand_champion", "Grand Champion", "🏆", "tag", "Its picture wins a Tournament bracket while this tag was the seed theme", lambda c: False),  # awarded manually, see award_manual
-    BadgeDef("precision", "Precision", "🧭", "tag", "sigma below threshold and mu in the top 10% at the same time", lambda c: _confident(c) and c.rank_pct is not None and c.rank_pct >= 0.9),
-    BadgeDef("hall_of_fame", "Hall of Fame", "🏛️", "tag", "Already holds Century Club + Rock Solid + Top Dog", lambda c: {"century_club", "rock_solid", "top_dog"} <= c.held),
+    BadgeDef("first_blood", "First Blood", "🩸", "tag", "First-ever win", lambda c: c.stats.wins >= 1, difficulty="common"),
+    BadgeDef("on_a_roll", "On a Roll", "🔥", "tag", "5-win streak", lambda c: c.stats.streak >= 5, difficulty="common"),
+    BadgeDef("unstoppable", "Unstoppable", "🌪️", "tag", "10-win streak", lambda c: c.stats.streak >= 10, difficulty="rare"),
+    BadgeDef("iron_tag", "Iron Tag", "🛡️", "tag", "50 total comparisons survived", lambda c: c.stats.total >= 50, difficulty="rare"),
+    BadgeDef("crowd_favorite", "Crowd Favorite", "⭐", "tag", "mu crosses a high absolute threshold", lambda c: c.mu >= 35.0, difficulty="rare"),
+    BadgeDef("rock_solid", "Rock Solid", "🪨", "tag", "sigma drops below the confidence threshold", _confident, difficulty="common"),
+    BadgeDef("giant_slayer", "Giant Slayer", "⚔️", "tag", "Beat a tag rated 2+ tiers higher", lambda c: (c.upset_sigma_multiple or 0) >= UPSET_SIGMA_MULTIPLE, difficulty="epic"),
+    BadgeDef("comeback_kid", "Comeback Kid", "🔁", "tag", "3-loss streak recovered into a 3-win streak", lambda c: c.stats.prev_streak <= -3 and c.stats.streak >= 3, difficulty="rare"),
+    BadgeDef("century_club", "Century Club", "💯", "tag", "100 total comparisons", lambda c: c.stats.total >= 100, difficulty="epic"),
+    BadgeDef("undefeated_debut", "Undefeated Debut", "🎬", "tag", "Wins its first 5 comparisons in a row", lambda c: c.stats.total >= 5 and c.stats.losses == 0 and c.stats.streak >= 5, difficulty="rare"),
+    BadgeDef("marathoner", "Marathoner", "🏃", "tag", "200 total comparisons", lambda c: c.stats.total >= 200, difficulty="legendary"),
+    BadgeDef("untouchable", "Untouchable", "🧊", "tag", "15-win streak", lambda c: c.stats.streak >= 15, difficulty="epic"),
+    BadgeDef("legendary", "Legendary", "🐉", "tag", "20-win streak", lambda c: c.stats.streak >= 20, difficulty="legendary"),
+    BadgeDef("top_dog", "Top Dog", "🐕", "tag", "Reaches #1 mu rank in its pool", lambda c: c.rank_pct is not None and c.rank_pct >= 0.999, difficulty="legendary"),
+    BadgeDef("elite_eight", "Elite Eight", "8️⃣", "tag", "Reaches top 8 by mu", lambda c: c.rank_pct is not None and c.rank_pct >= 0.9, difficulty="epic"),
+    BadgeDef("sharpshooter", "Sharpshooter", "🎯", "tag", "80%+ win rate over its last 20 comparisons", lambda c: len(c.stats.last20) >= 20 and sum(c.stats.last20) / len(c.stats.last20) >= 0.8, difficulty="rare"),
+    BadgeDef("slow_burn", "Slow Burn", "🕯️", "tag", "Reaches Rock Solid confidence only after 150+ comparisons", lambda c: _confident(c) and c.stats.total >= 150, difficulty="epic"),
+    BadgeDef("fast_riser", "Fast Riser", "🚀", "tag", "Reaches Rock Solid confidence in under 30 comparisons", lambda c: _confident(c) and c.stats.total < 30, difficulty="rare"),
+    BadgeDef("redemption_arc", "Redemption Arc", "🌅", "tag", "5-loss streak recovered into a 5-win streak", lambda c: c.stats.prev_streak <= -5 and c.stats.streak >= 5, difficulty="epic"),
+    BadgeDef("battle_scarred", "Battle Scarred", "🩹", "tag", "Survives 20 losses, still net-positive record", lambda c: c.stats.losses >= 20 and c.stats.wins > c.stats.losses, difficulty="epic"),
+    BadgeDef("overachiever", "Overachiever", "📈", "tag", "mu exceeds its own first-20-comparison baseline by a large margin", lambda c: c.stats.baseline_mu is not None and c.mu - c.stats.baseline_mu >= 10.0, difficulty="epic"),
+    BadgeDef("consistency_king", "Consistency King", "👑", "tag", "sigma stays below the confidence threshold continuously across 100+ comparisons", lambda c: _confident(c) and c.stats.confidence_since is not None and c.stats.total >= 100, difficulty="legendary"),
+    BadgeDef("giant_slayer_ii", "Giant Slayer II", "🗡️", "tag", "Beats a top-3 ranked tag at least once", lambda c: c.beat_top3, difficulty="epic"),
+    BadgeDef("ironclad", "Ironclad", "⛓️", "tag", "Never drops below a positive record after its first 20 comparisons", lambda c: c.stats.total >= 20 and c.stats.wins > c.stats.losses, difficulty="rare"),
+    BadgeDef("dark_horse_tag", "Dark Horse Tag", "🐴", "tag", "Starts with a loss but finishes in the top 10", lambda c: c.stats.total >= 1 and not c.stats.last20[:1] == [True] and c.rank_pct is not None and c.rank_pct >= 0.8, difficulty="rare"),
+    BadgeDef("streak_breaker", "Streak Breaker", "✂️", "tag", "Ends another tag's active 5+ win streak", lambda c: (c.upset_sigma_multiple or 0) > 0 and c.stats.streak >= 1, difficulty="rare"),
+    BadgeDef("halfway_hero", "Halfway Hero", "🏁", "tag", "Reaches 50 comparisons with a winning record", lambda c: c.stats.total >= 50 and c.stats.wins > c.stats.losses, difficulty="rare"),
+    BadgeDef("grand_champion", "Grand Champion", "🏆", "tag", "Its picture wins a Tournament bracket while this tag was the seed theme", lambda c: False, difficulty="legendary"),  # awarded manually, see award_manual
+    BadgeDef("precision", "Precision", "🧭", "tag", "sigma below threshold and mu in the top 10% at the same time", lambda c: _confident(c) and c.rank_pct is not None and c.rank_pct >= 0.9, difficulty="legendary"),
+    BadgeDef("hall_of_fame", "Hall of Fame", "🏛️", "tag", "Already holds Century Club + Rock Solid + Top Dog", lambda c: {"century_club", "rock_solid", "top_dog"} <= c.held, difficulty="legendary"),
 ]
 
 PICTURE_BADGES: list[BadgeDef] = [
-    BadgeDef("fan_favorite", "Fan Favorite", "💖", "picture", "First to reach top-10 mu in its pool", lambda c: c.rank_pct is not None and c.rank_pct >= 0.8),
-    BadgeDef("photogenic", "Photogenic", "📸", "picture", "10-win streak", lambda c: c.stats.streak >= 10),
-    BadgeDef("veteran", "Veteran", "🎖️", "picture", "Survives 100 comparisons", lambda c: c.stats.total >= 100),
-    BadgeDef("dark_horse", "Dark Horse", "🐎", "picture", "Beats a much higher-rated picture", lambda c: (c.upset_sigma_multiple or 0) >= UPSET_SIGMA_MULTIPLE),
-    BadgeDef("consistent", "Consistent", "⚖️", "picture", "sigma below confidence threshold with mu in top quartile", lambda c: _confident(c) and c.rank_pct is not None and c.rank_pct >= 0.75),
-    BadgeDef("tournament_champion", "Tournament Champion", "🏅", "picture", "Wins a full Tournament bracket", lambda c: c.stats.tournament_wins >= 1),
-    BadgeDef("rediscovered_gem", "Rediscovered Gem", "💎", "picture", "Resurfaced via Random Rediscovery and wins", lambda c: c.stats.rediscovery_wins >= 1),
-    BadgeDef("perfect_streak", "Perfect Streak", "🌟", "picture", "10 straight wins, no losses ever", lambda c: c.stats.streak >= 10 and c.stats.losses == 0),
-    BadgeDef("crowd_pleaser", "Crowd Pleaser", "🙌", "picture", "High mu reached with low total comparisons", lambda c: c.mu >= 30.0 and c.stats.total <= 15),
-    BadgeDef("old_reliable", "Old Reliable", "🕰️", "picture", "First rated, still top-10 after N comparisons", lambda c: c.stats.total >= 50 and c.rank_pct is not None and c.rank_pct >= 0.8),
-    BadgeDef("marathon_runner", "Marathon Runner", "🥾", "picture", "200 total comparisons", lambda c: c.stats.total >= 200),
-    BadgeDef("untouchable_pic", "Untouchable", "❄️", "picture", "15-win streak", lambda c: c.stats.streak >= 15),
-    BadgeDef("legendary_pic", "Legendary", "🦄", "picture", "20-win streak", lambda c: c.stats.streak >= 20),
-    BadgeDef("top_of_the_pile", "Top of the Pile", "🗻", "picture", "Reaches #1 mu in its pool", lambda c: c.rank_pct is not None and c.rank_pct >= 0.999),
-    BadgeDef("elite_eight_pic", "Elite Eight", "🎱", "picture", "Top 8 by mu", lambda c: c.rank_pct is not None and c.rank_pct >= 0.9),
-    BadgeDef("sharpshooter_pic", "Sharpshooter", "🏹", "picture", "80%+ win rate over its last 20 comparisons", lambda c: len(c.stats.last20) >= 20 and sum(c.stats.last20) / len(c.stats.last20) >= 0.8),
-    BadgeDef("slow_burn_pic", "Slow Burn", "🐢", "picture", "Reaches confidence threshold only after 150+ comparisons", lambda c: _confident(c) and c.stats.total >= 150),
-    BadgeDef("fast_riser_pic", "Fast Riser", "🐇", "picture", "Reaches confidence threshold in under 30 comparisons", lambda c: _confident(c) and c.stats.total < 30),
-    BadgeDef("redemption_arc_pic", "Redemption Arc", "🌄", "picture", "5-loss streak recovered into a 5-win streak", lambda c: c.stats.prev_streak <= -5 and c.stats.streak >= 5),
-    BadgeDef("battle_scarred_pic", "Battle Scarred", "🧯", "picture", "Survives 20 losses, still net-positive record", lambda c: c.stats.losses >= 20 and c.stats.wins > c.stats.losses),
-    BadgeDef("bracket_buster", "Bracket Buster", "💥", "picture", "Wins a tournament match as a low/random seed against a much higher-rated pic", lambda c: False),  # awarded manually
-    BadgeDef("finalist", "Finalist", "🥈", "picture", "Reaches a tournament final without winning it", lambda c: c.stats.tournament_finals >= 1 and c.stats.tournament_wins == 0),
-    BadgeDef("double_champion", "Double Champion", "🥇", "picture", "Wins two separate Tournament brackets", lambda c: c.stats.tournament_wins >= 2),
-    BadgeDef("ironclad_pic", "Ironclad", "🔒", "picture", "Never drops below a positive record after its first 20 comparisons", lambda c: c.stats.total >= 20 and c.stats.wins > c.stats.losses),
-    BadgeDef("late_bloomer", "Late Bloomer", "🌸", "picture", "Starts with a loss but finishes in the top 10", lambda c: c.stats.total >= 1 and c.rank_pct is not None and c.rank_pct >= 0.8),
-    BadgeDef("streak_breaker_pic", "Streak Breaker", "🔨", "picture", "Ends another picture's active 5+ win streak", lambda c: (c.upset_sigma_multiple or 0) > 0 and c.stats.streak >= 1),
-    BadgeDef("halfway_hero_pic", "Halfway Hero", "🚩", "picture", "Reaches 50 comparisons with a winning record", lambda c: c.stats.total >= 50 and c.stats.wins > c.stats.losses),
-    BadgeDef("rediscovered_twice", "Rediscovered Twice", "🔍", "picture", "Resurfaced by Random Rediscovery more than once and wins each time", lambda c: c.stats.rediscovery_wins >= 2),
-    BadgeDef("precision_pic", "Precision", "🧿", "picture", "sigma below threshold and mu in the top 10% at the same time", lambda c: _confident(c) and c.rank_pct is not None and c.rank_pct >= 0.9),
-    BadgeDef("hall_of_fame_pic", "Hall of Fame", "🏟️", "picture", "Already holds Veteran + Consistent + Top of the Pile", lambda c: {"veteran", "consistent", "top_of_the_pile"} <= c.held),
+    BadgeDef("fan_favorite", "Fan Favorite", "💖", "picture", "First to reach top-10 mu in its pool", lambda c: c.rank_pct is not None and c.rank_pct >= 0.8, difficulty="rare"),
+    BadgeDef("photogenic", "Photogenic", "📸", "picture", "10-win streak", lambda c: c.stats.streak >= 10, difficulty="rare"),
+    BadgeDef("veteran", "Veteran", "🎖️", "picture", "Survives 100 comparisons", lambda c: c.stats.total >= 100, difficulty="epic"),
+    BadgeDef("dark_horse", "Dark Horse", "🐎", "picture", "Beats a much higher-rated picture", lambda c: (c.upset_sigma_multiple or 0) >= UPSET_SIGMA_MULTIPLE, difficulty="epic"),
+    BadgeDef("consistent", "Consistent", "⚖️", "picture", "sigma below confidence threshold with mu in top quartile", lambda c: _confident(c) and c.rank_pct is not None and c.rank_pct >= 0.75, difficulty="rare"),
+    BadgeDef("tournament_champion", "Tournament Champion", "🏅", "picture", "Wins a full Tournament bracket", lambda c: c.stats.tournament_wins >= 1, difficulty="epic"),
+    BadgeDef("rediscovered_gem", "Rediscovered Gem", "💎", "picture", "Resurfaced via Random Rediscovery and wins", lambda c: c.stats.rediscovery_wins >= 1, difficulty="rare"),
+    BadgeDef("perfect_streak", "Perfect Streak", "🌟", "picture", "10 straight wins, no losses ever", lambda c: c.stats.streak >= 10 and c.stats.losses == 0, difficulty="epic"),
+    BadgeDef("crowd_pleaser", "Crowd Pleaser", "🙌", "picture", "High mu reached with low total comparisons", lambda c: c.mu >= 30.0 and c.stats.total <= 15, difficulty="rare"),
+    BadgeDef("old_reliable", "Old Reliable", "🕰️", "picture", "First rated, still top-10 after N comparisons", lambda c: c.stats.total >= 50 and c.rank_pct is not None and c.rank_pct >= 0.8, difficulty="epic"),
+    BadgeDef("marathon_runner", "Marathon Runner", "🥾", "picture", "200 total comparisons", lambda c: c.stats.total >= 200, difficulty="legendary"),
+    BadgeDef("untouchable_pic", "Untouchable", "❄️", "picture", "15-win streak", lambda c: c.stats.streak >= 15, difficulty="epic"),
+    BadgeDef("legendary_pic", "Legendary", "🦄", "picture", "20-win streak", lambda c: c.stats.streak >= 20, difficulty="legendary"),
+    BadgeDef("top_of_the_pile", "Top of the Pile", "🗻", "picture", "Reaches #1 mu in its pool", lambda c: c.rank_pct is not None and c.rank_pct >= 0.999, difficulty="legendary"),
+    BadgeDef("elite_eight_pic", "Elite Eight", "🎱", "picture", "Top 8 by mu", lambda c: c.rank_pct is not None and c.rank_pct >= 0.9, difficulty="epic"),
+    BadgeDef("sharpshooter_pic", "Sharpshooter", "🏹", "picture", "80%+ win rate over its last 20 comparisons", lambda c: len(c.stats.last20) >= 20 and sum(c.stats.last20) / len(c.stats.last20) >= 0.8, difficulty="rare"),
+    BadgeDef("slow_burn_pic", "Slow Burn", "🐢", "picture", "Reaches confidence threshold only after 150+ comparisons", lambda c: _confident(c) and c.stats.total >= 150, difficulty="epic"),
+    BadgeDef("fast_riser_pic", "Fast Riser", "🐇", "picture", "Reaches confidence threshold in under 30 comparisons", lambda c: _confident(c) and c.stats.total < 30, difficulty="rare"),
+    BadgeDef("redemption_arc_pic", "Redemption Arc", "🌄", "picture", "5-loss streak recovered into a 5-win streak", lambda c: c.stats.prev_streak <= -5 and c.stats.streak >= 5, difficulty="epic"),
+    BadgeDef("battle_scarred_pic", "Battle Scarred", "🧯", "picture", "Survives 20 losses, still net-positive record", lambda c: c.stats.losses >= 20 and c.stats.wins > c.stats.losses, difficulty="epic"),
+    BadgeDef("bracket_buster", "Bracket Buster", "💥", "picture", "Wins a tournament match as a low/random seed against a much higher-rated pic", lambda c: False, difficulty="legendary"),  # awarded manually
+    BadgeDef("finalist", "Finalist", "🥈", "picture", "Reaches a tournament final without winning it", lambda c: c.stats.tournament_finals >= 1 and c.stats.tournament_wins == 0, difficulty="rare"),
+    BadgeDef("double_champion", "Double Champion", "🥇", "picture", "Wins two separate Tournament brackets", lambda c: c.stats.tournament_wins >= 2, difficulty="legendary"),
+    BadgeDef("ironclad_pic", "Ironclad", "🔒", "picture", "Never drops below a positive record after its first 20 comparisons", lambda c: c.stats.total >= 20 and c.stats.wins > c.stats.losses, difficulty="rare"),
+    BadgeDef("late_bloomer", "Late Bloomer", "🌸", "picture", "Starts with a loss but finishes in the top 10", lambda c: c.stats.total >= 1 and c.rank_pct is not None and c.rank_pct >= 0.8, difficulty="rare"),
+    BadgeDef("streak_breaker_pic", "Streak Breaker", "🔨", "picture", "Ends another picture's active 5+ win streak", lambda c: (c.upset_sigma_multiple or 0) > 0 and c.stats.streak >= 1, difficulty="rare"),
+    BadgeDef("halfway_hero_pic", "Halfway Hero", "🚩", "picture", "Reaches 50 comparisons with a winning record", lambda c: c.stats.total >= 50 and c.stats.wins > c.stats.losses, difficulty="rare"),
+    BadgeDef("rediscovered_twice", "Rediscovered Twice", "🔍", "picture", "Resurfaced by Random Rediscovery more than once and wins each time", lambda c: c.stats.rediscovery_wins >= 2, difficulty="epic"),
+    BadgeDef("precision_pic", "Precision", "🧿", "picture", "sigma below threshold and mu in the top 10% at the same time", lambda c: _confident(c) and c.rank_pct is not None and c.rank_pct >= 0.9, difficulty="legendary"),
+    BadgeDef("hall_of_fame_pic", "Hall of Fame", "🏟️", "picture", "Already holds Veteran + Consistent + Top of the Pile", lambda c: {"veteran", "consistent", "top_of_the_pile"} <= c.held, difficulty="legendary"),
 ]
+
+DIFFICULTY_ORDER: dict[Difficulty, int] = {"common": 0, "rare": 1, "epic": 2, "legendary": 3}
+DIFFICULTY_COLORS: dict[Difficulty, dict[str, str]] = {
+    # (background, border, text/glow) - used by the GUI for the badge pill styling.
+    "common": {"bg": "rgba(90, 90, 100, 210)", "border": "#b8b8c2", "text": "#f0f0f5"},
+    "rare": {"bg": "rgba(30, 70, 150, 210)", "border": "#5fa8ff", "text": "#eaf3ff"},
+    "epic": {"bg": "rgba(90, 30, 150, 210)", "border": "#c77dff", "text": "#f5eaff"},
+    "legendary": {"bg": "rgba(150, 95, 10, 220)", "border": "#ffc94d", "text": "#fff6e0"},
+}
+
+
+def rarest_badge_id(entity_type: EntityType, entity_id: str, held: set[str] | None = None) -> str | None:
+    """The lowest-global-earn-count badge id an entity currently holds, or None if it holds
+    none. Rarity is computed across the whole `data/badges.json` bucket for this entity_type:
+    the badge_id with the fewest distinct entities holding it wins; ties break toward the
+    higher difficulty tier, then alphabetically by badge_id for determinism."""
+    if held is None:
+        held = held_badge_ids(entity_type, entity_id)
+    if not held:
+        return None
+    all_badges = load_badges()
+    bucket = all_badges.get(entity_type + "s", {})
+    counts: dict[str, int] = {}
+    for entries in bucket.values():
+        for entry in entries:
+            bid = entry.get("badge_id")
+            if bid:
+                counts[bid] = counts.get(bid, 0) + 1
+
+    def sort_key(bid: str) -> tuple[int, int, str]:
+        count = counts.get(bid, 0)
+        badge = BADGE_BY_ID.get(bid)
+        tier = -DIFFICULTY_ORDER.get(badge.difficulty, 0) if badge is not None else 0
+        return (count, tier, bid)
+
+    return min(held, key=sort_key)
 
 BADGES: dict[EntityType, list[BadgeDef]] = {"tag": TAG_BADGES, "picture": PICTURE_BADGES}
 BADGE_BY_ID: dict[str, BadgeDef] = {b.id: b for b in TAG_BADGES + PICTURE_BADGES}
