@@ -95,7 +95,12 @@ def start_session(
 
     client = client or create_client(settings)
 
-    hashes = pool.build_pool(client=client, query=query, pool_size=pool_size) if pool_size else pool.build_pool(client=client, query=query)
+    file_service_key = settings.pool.file_service_key
+    hashes = (
+        pool.build_pool(client=client, query=query, pool_size=pool_size, file_service_key=file_service_key)
+        if pool_size
+        else pool.build_pool(client=client, query=query, file_service_key=file_service_key)
+    )
     if not hashes:
         raise NoRelevantFilesError(query or [])
 
@@ -257,8 +262,21 @@ def pick_rediscovery_pair(session: Session) -> tuple[FileMetaData, FileMetaData]
 
 def get_search_options(client: hydrus_api.Client | None = None, settings: Settings | None = None) -> pool.SearchOptions:
     """The same Top/Random/Bottom tag categories the CLI offers at startup (pool.prompt_for_search)."""
-    client = client or create_client(settings or load_settings())
-    return pool.build_search_options(client)
+    settings = settings or load_settings()
+    client = client or create_client(settings)
+    return pool.build_search_options(client, file_service_key=settings.pool.file_service_key)
+
+
+def get_filtered_search_options(
+    filters: pool.FilterParams, client: hydrus_api.Client | None = None, settings: Settings | None = None,
+) -> pool.SearchOptions:
+    """DB Search variant of get_search_options: narrows the Top/Random/Bottom tag picker by a
+    fresh Hydrus search per candidate tag (score/resolution/rating-count/date/namespace/archive/
+    service-key filters) instead of the unfiltered candidate-seed logic. Used by
+    POST /search-options/filtered."""
+    settings = settings or load_settings()
+    client = client or create_client(settings)
+    return pool.build_filtered_search_options(client, filters)
 
 
 def get_prediction_history() -> list[dict[str, Any]]:

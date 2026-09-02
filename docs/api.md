@@ -80,6 +80,7 @@ TagRank itself is configured with (`config/KEYS`).
 |---|---|
 | `GET /tags` | Every rated tag and its current TrueSkill score. |
 | `GET /search-options` | The Top/Random/Bottom tag picker the CLI shows at startup — use a returned `tag` as one element of `query` in `POST /sessions`. |
+| `POST /search-options/filtered` | Same Top/Random/Bottom shape as `GET /search-options`, but each candidate tag is first narrowed by a fresh Hydrus search over score/resolution/rating-count/date-added/namespace/archive/service-key filters. See below. |
 | `GET /history/predictions` | Raw per-comparison prediction-tracking records (one per judged pair, ever) — the same data the summary charts are built from, if you want to chart it yourself. |
 | `GET /history/graphs` | The four summary charts (rolling accuracy, ratings-per-date, calibration, tag rankings) as `{"title", "png_base64"}`. |
 | `GET /history/graphs/{index}.png` | One chart as a raw PNG, for direct `<img src="http://127.0.0.1:8420/history/graphs/0.png">` embedding without base64. |
@@ -97,7 +98,70 @@ Every failure returns a non-2xx response with a JSON body:
 | `SessionNotFoundError` | 404 | The session id doesn't exist (never created, or already ended). |
 | `NoPairAvailableError` | 409 | Called `/result` before calling `/next-pair`, or after the pool was already exhausted. |
 | `JobNotFoundError` | 404 | The session-start job id doesn't exist. |
+| `UnknownServiceKeyError` | 400 | `POST /search-options/filtered` was given a `file_service_keys`/`tag_service_keys` entry that doesn't match any key `GET /get_services` (on your Hydrus client) currently reports. |
 | anything else (`HydrusConnectionError`, `HydrusPermissionError`, `NoRelevantFilesError`, ...) | 502 | Something about the Hydrus connection, permissions, or query went wrong — `message` has details. Also surfaces as `status: "error"` when it happens during session start; check `GET /sessions/{job_id}`. |
+
+## `POST /search-options/filtered`
+
+DB Search variant of `GET /search-options`. Same TrueSkill-ranked Top/Random/Bottom tag
+picker, but each candidate tag is first narrowed by a fresh Hydrus search combining the tag
+with every filter axis below — needed because none of these axes (aside from score) are
+available on an already-fetched tag pill.
+
+Request body (every field optional; a missing key behaves like a wide-open "no filter" range
+on that axis):
+
+```json
+{
+  "filter_tag": "",
+  "min_files": 0,
+  "score_min": -2.0, "score_max": 2.0,
+  "aspect_ratio_min": 0.5, "aspect_ratio_max": 1.5,
+  "pixel_count_min": 1800000, "pixel_count_max": 2200000,
+  "rating_count_min": 0, "rating_count_max": 50,
+  "date_added_days_ago_min": 150, "date_added_days_ago_max": 210,
+  "namespace_mode": "all",
+  "archive_mode": "all",
+  "file_service_keys": null,
+  "tag_service_keys": null
+}
+```
+
+- `filter_tag` — substring match on tag text (case-insensitive), `""` = no filter.
+- `min_files` — minimum matching-file count (after every other filter) for a tag to be
+  included at all.
+- `score_min`/`score_max` — TrueSkill score (`mu - 3*sigma`) band, same metric `GET /tags`
+  reports.
+- `aspect_ratio` is `width / height` (`1.0` = square, `>1` = wider than tall); `pixel_count`
+  is `width * height`. Hydrus has no native predicate for either, so files matching the tag
+  are fetched and filtered on these in Python.
+- `rating_count` — Hydrus has no per-file "rating count" concept comparable across rating
+  service types (like/dislike ratings are boolean, numerical ratings are a single star value),
+  so this counts how many tags (across all tag services) currently sit on the file, as a
+  stand-in metric.
+- `date_added_days_ago_min`/`max` count backward from now — `min=150, max=210` means "added
+  between 150 and 210 days ago." Converted to Hydrus's `system:time imported since/before N
+  days ago` predicates.
+- `namespace_mode` — `all` | `namespaced` (`system:has namespace`) | `unnamespaced`
+  (`system:no namespace`).
+- `archive_mode` — `all` | `archived` (`system:archived`) | `inbox` (`system:inbox`).
+- `file_service_keys`/`tag_service_keys` — `null` or `[]` means "all services" (today's
+  default); otherwise a list of keys matching what `GET /get_services` (on your Hydrus client)
+  returns. An unrecognized key raises `UnknownServiceKeyError` (see the error table above).
+
+Response body is identical in shape to `GET /search-options`:
+
+```json
+{
+  "top": [{"index": 0, "tag": "character:mario", "score": 1.82, "file_count": 340}, ...],
+  "random": [...],
+  "bottom": [...]
+}
+```
+
+An empty result after filtering is a normal `200` with empty `top`/`random`/`bottom` arrays,
+not an error — only genuinely broken input (unknown service key) or a Hydrus-side failure
+raises.
 
 ## Full route reference
 

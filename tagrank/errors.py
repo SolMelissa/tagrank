@@ -56,3 +56,12 @@ class NoFilesToSortError(TagRankError):
 
 class MissingAddTagsPermissionError(TagRankError):
     """The access key lacks the 'edit file tags' permission needed to write sort tags."""
+
+
+class UnknownServiceKeyError(TagRankError):
+    """A caller-supplied file_service_key/tag_service_key doesn't match any service Hydrus
+    currently knows about (per GET /get_services)."""
+
+    def __init__(self, service_key: str):
+        self.service_key = service_key
+        super().__init__(f"Unknown Hydrus service key: '{service_key}'")

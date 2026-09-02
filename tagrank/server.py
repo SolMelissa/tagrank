@@ -21,8 +21,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from tagrank import service
-from tagrank.errors import TagRankError
+from tagrank import pool, service
+from tagrank.errors import TagRankError, UnknownServiceKeyError
 from tagrank.service import NoPairAvailableError, Session, SessionNotFoundError
 
 app = FastAPI(
@@ -44,6 +44,7 @@ app = FastAPI(
 _ERROR_STATUS: dict[type[TagRankError], int] = {
     SessionNotFoundError: 404,
     NoPairAvailableError: 409,
+    UnknownServiceKeyError: 400,
 }
 
 
@@ -134,6 +135,51 @@ class SearchOptionsResponse(BaseModel):
     top: list[TagOptionOut]
     random: list[TagOptionOut]
     bottom: list[TagOptionOut]
+
+
+class FilteredSearchOptionsRequest(BaseModel):
+    filter_tag: str = Field(default="", description="Substring match on tag text (case-insensitive). \"\" = no filter.")
+    min_files: int = Field(default=0, description="Minimum matching-file count for a tag to be included.")
+
+    score_min: float = Field(default=float("-inf"))
+    score_max: float = Field(default=float("inf"))
+
+    aspect_ratio_min: float = Field(default=0.0, description="width / height lower bound.")
+    aspect_ratio_max: float = Field(default=float("inf"), description="width / height upper bound.")
+    pixel_count_min: float = Field(default=0.0, description="width * height lower bound.")
+    pixel_count_max: float = Field(default=float("inf"), description="width * height upper bound.")
+
+    rating_count_min: float = Field(default=0.0)
+    rating_count_max: float = Field(default=float("inf"))
+
+    date_added_days_ago_min: float = Field(default=0.0, description="Counts backward from now, e.g. min=150/max=210 means 'added between 150 and 210 days ago'.")
+    date_added_days_ago_max: float | None = Field(default=None)
+
+    namespace_mode: Literal["all", "namespaced", "unnamespaced"] = "all"
+    archive_mode: Literal["all", "archived", "inbox"] = "all"
+
+    file_service_keys: list[str] | None = Field(default=None, description="null or [] = all file services.")
+    tag_service_keys: list[str] | None = Field(default=None, description="null or [] = all tag services.")
+
+    def to_filter_params(self) -> pool.FilterParams:
+        return pool.FilterParams(
+            filter_tag=self.filter_tag,
+            min_files=self.min_files,
+            score_min=self.score_min,
+            score_max=self.score_max,
+            aspect_ratio_min=self.aspect_ratio_min,
+            aspect_ratio_max=self.aspect_ratio_max,
+            pixel_count_min=self.pixel_count_min,
+            pixel_count_max=self.pixel_count_max,
+            rating_count_min=self.rating_count_min,
+            rating_count_max=self.rating_count_max,
+            date_added_days_ago_min=self.date_added_days_ago_min,
+            date_added_days_ago_max=self.date_added_days_ago_max,
+            namespace_mode=self.namespace_mode,
+            archive_mode=self.archive_mode,
+            file_service_keys=self.file_service_keys or None,
+            tag_service_keys=self.tag_service_keys or None,
+        )
 
 
 class GraphInfo(BaseModel):
@@ -296,6 +342,30 @@ def list_tags() -> list[TagInfo]:
 def search_options() -> SearchOptionsResponse:
     try:
         options = service.get_search_options()
+    except TagRankError as e:
+        _raise_http(e)
+        raise
+    return SearchOptionsResponse(
+        top=[TagOptionOut(**o._asdict()) for o in options.top],
+        random=[TagOptionOut(**o._asdict()) for o in options.random],
+        bottom=[TagOptionOut(**o._asdict()) for o in options.bottom],
+    )
+
+
+@app.post(
+    "/search-options/filtered",
+    response_model=SearchOptionsResponse,
+    summary="Get the Top/Random/Bottom tag picker options, narrowed by a fresh Hydrus search",
+    description="DB Search variant of GET /search-options: same Top/Random/Bottom tag "
+                "categories, but each candidate tag is first narrowed by a fresh Hydrus search "
+                "combining the tag with score/aspect-ratio/pixel-count/rating-count/date-added/"
+                "namespace/archive/service-key filters, since none of those axes are available "
+                "on an already-fetched tag pill. An empty result after filtering is a normal "
+                "200 with empty arrays, not an error.",
+)
+def search_options_filtered(request: FilteredSearchOptionsRequest) -> SearchOptionsResponse:
+    try:
+        options = service.get_filtered_search_options(request.to_filter_params())
     except TagRankError as e:
         _raise_http(e)
         raise

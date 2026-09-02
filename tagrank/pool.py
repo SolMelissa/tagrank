@@ -25,13 +25,14 @@ queries).
 import json
 import logging
 import random
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import hydrus_api
 
 from config import (
     DATA_DIR,
     ensure_config_files,
+    get,
     get_int,
     get_bool,
     get_float_or_none,
@@ -39,6 +40,7 @@ from config import (
     key,
     is_filtered_tag,
 )
+from tagrank.errors import UnknownServiceKeyError
 
 # --- pull settings out of config/KEYS and config/SETTINGS ---
 API_URL            = key("API_URL", "http://127.0.0.1:45869/")
@@ -53,6 +55,9 @@ MIN_POOL_SATISFIED  = get_float_or_none("MIN_POOL_SATISFIED", None)
 CANDIDATE_SEED_COUNT = get_int("CANDIDATE_SEED_COUNT", 10000)
 SEED_COUNT_FOR_QUERY = get_int("SEED_COUNT_FOR_QUERY", 10)
 API_LIMIT_FUZZ       = get_int("API_LIMIT_FUZZ", 2)
+FILE_SERVICE_KEY     = get("FILE_SERVICE_KEY", "").strip()
+if FILE_SERVICE_KEY == "FILL_ME_IN":
+    FILE_SERVICE_KEY = ""
 TOP_TAG_OPTIONS      = get_int("TOP_TAG_OPTIONS", 20)
 BOTTOM_TAG_OPTIONS   = get_int("BOTTOM_TAG_OPTIONS", 10)
 MIN_TAG_FILE_COUNT   = get_int("MIN_TAG_FILE_COUNT", 1)
@@ -100,10 +105,11 @@ def trueskill_score(rating: tuple[float, float]) -> float:
     return mu - 3 * sigma
 
 
-def get_tag_file_count(tag: str, client: hydrus_api.Client) -> int:
+def get_tag_file_count(tag: str, client: hydrus_api.Client, file_service_key: str = "") -> int:
     """Number of files in the Hydrus db currently carrying `tag`."""
     try:
-        resp = client.search_files([tag], return_hashes=True)
+        kwargs = {"file_service_keys": [file_service_key]} if file_service_key else {}
+        resp = client.search_files([tag], return_hashes=True, **kwargs)
         return len(resp.get("hashes") or [])
     except Exception as e:
         logger.error(f"Could not get file count for tag '{tag}': {e}")
@@ -130,28 +136,16 @@ class SearchOptions(NamedTuple):
     lookup: dict[int, str]
 
 
-def build_search_options(client: hydrus_api.Client | None = None) -> SearchOptions:
-    """Pure data half of the search picker: ranks tags by TrueSkill score and buckets them
-    into Top/Random/Bottom categories, same selection logic the CLI prompt renders. Used
-    directly by the API's /search-options endpoint, and by prompt_for_search() below."""
-    client = client or _get_default_client()
-    ratings = load_ratings()
-    ranked = sorted(ratings.items(), key=lambda kv: trueskill_score(kv[1]))
-
-    all_tags = [
-        tag for tag, _rating in ranked
-        if not tag.startswith("filename:") and not is_filtered_tag(tag)
-    ]
-
-    file_counts = {tag: get_tag_file_count(tag, client) for tag in all_tags}
-    if MIN_TAG_FILE_COUNT > 1:
-        dropped = sum(1 for tag in all_tags if file_counts[tag] < MIN_TAG_FILE_COUNT)
-        if dropped:
-            logger.info(
-                f"Hiding {dropped} tag(s) with fewer than {MIN_TAG_FILE_COUNT} files "
-                f"from the search picker (MIN_TAG_FILE_COUNT)."
-            )
-        all_tags = [tag for tag in all_tags if file_counts[tag] >= MIN_TAG_FILE_COUNT]
+def _bucket_top_random_bottom(entries: list[tuple[str, float, int]]) -> SearchOptions:
+    """Shared Top/Random/Bottom tag-selection logic: given (tag, trueskill_score, file_count)
+    triples (already filtered/scored by the caller), rank by score and slice into the three
+    categories the CLI prompt and the /search-options* API endpoints both offer. Factored out
+    so build_search_options (unfiltered) and build_filtered_search_options (DB Search) share
+    one selection implementation instead of duplicating it."""
+    ranked = sorted(entries, key=lambda e: e[1])
+    all_tags = [tag for tag, _score, _count in ranked]
+    score_by_tag = {tag: score for tag, score, _count in ranked}
+    count_by_tag = {tag: count for tag, _score, count in ranked}
 
     top_tags = all_tags[-TOP_TAG_OPTIONS:] if TOP_TAG_OPTIONS > 0 else []
     bottom_tags = all_tags[:BOTTOM_TAG_OPTIONS] if BOTTOM_TAG_OPTIONS > 0 else []
@@ -169,12 +163,7 @@ def build_search_options(client: hydrus_api.Client | None = None) -> SearchOptio
 
     def _to_options(tags: list[str], start_index: int) -> list[TagOption]:
         return [
-            TagOption(
-                index=idx,
-                tag=tag,
-                score=trueskill_score(ratings.get(tag, (0.0, 0.0))),
-                file_count=file_counts.get(tag, 0),
-            )
+            TagOption(index=idx, tag=tag, score=score_by_tag[tag], file_count=count_by_tag[tag])
             for idx, tag in enumerate(tags, start=start_index)
         ]
 
@@ -185,6 +174,184 @@ def build_search_options(client: hydrus_api.Client | None = None) -> SearchOptio
     lookup = {opt.index: opt.tag for opt in top_options + random_options + bottom_options}
 
     return SearchOptions(top=top_options, random=random_options, bottom=bottom_options, lookup=lookup)
+
+
+def build_search_options(client: hydrus_api.Client | None = None, file_service_key: str = "") -> SearchOptions:
+    """Pure data half of the search picker: ranks tags by TrueSkill score and buckets them
+    into Top/Random/Bottom categories, same selection logic the CLI prompt renders. Used
+    directly by the API's /search-options endpoint, and by prompt_for_search() below."""
+    client = client or _get_default_client()
+    ratings = load_ratings()
+
+    all_tags = [
+        tag for tag in ratings
+        if not tag.startswith("filename:") and not is_filtered_tag(tag)
+    ]
+
+    file_counts = {tag: get_tag_file_count(tag, client, file_service_key) for tag in all_tags}
+    if MIN_TAG_FILE_COUNT > 1:
+        dropped = sum(1 for tag in all_tags if file_counts[tag] < MIN_TAG_FILE_COUNT)
+        if dropped:
+            logger.info(
+                f"Hiding {dropped} tag(s) with fewer than {MIN_TAG_FILE_COUNT} files "
+                f"from the search picker (MIN_TAG_FILE_COUNT)."
+            )
+        all_tags = [tag for tag in all_tags if file_counts[tag] >= MIN_TAG_FILE_COUNT]
+
+    entries = [(tag, trueskill_score(ratings[tag]), file_counts[tag]) for tag in all_tags]
+    return _bucket_top_random_bottom(entries)
+
+
+class FilterParams(NamedTuple):
+    """POST /search-options/filtered request, already resolved to absolute min/max values by
+    the caller (Undertow's DB Search filter bar) - see plans/undertow-filtered-search-api.md."""
+    filter_tag: str = ""
+    min_files: int = 0
+    score_min: float = float("-inf")
+    score_max: float = float("inf")
+    aspect_ratio_min: float = 0.0
+    aspect_ratio_max: float = float("inf")
+    pixel_count_min: float = 0.0
+    pixel_count_max: float = float("inf")
+    rating_count_min: float = 0.0
+    rating_count_max: float = float("inf")
+    date_added_days_ago_min: float = 0.0
+    date_added_days_ago_max: float | None = None
+    namespace_mode: str = "all"
+    archive_mode: str = "all"
+    file_service_keys: list[str] | None = None
+    tag_service_keys: list[str] | None = None
+
+
+def _validate_service_keys(client: hydrus_api.Client, filters: FilterParams) -> None:
+    """Raise UnknownServiceKeyError if any explicitly-requested service key isn't one Hydrus
+    currently reports via GET /get_services. Empty/None means 'all services' and is not checked."""
+    requested = list(filters.file_service_keys or []) + list(filters.tag_service_keys or [])
+    if not requested:
+        return
+    services_response = client.get_services()
+    known_keys = set(services_response.get("services", {}).keys())
+    for service_key in requested:
+        if service_key not in known_keys:
+            raise UnknownServiceKeyError(service_key)
+
+
+def _base_system_predicates(filters: FilterParams) -> list[str]:
+    """system: predicates coverable directly by Hydrus's own search (namespace, archive/inbox,
+    date-imported) - see hydrus_client.py notes on why aspect_ratio/pixel_count/rating_count
+    are instead applied as a Python post-filter over fetched file metadata."""
+    predicates: list[str] = []
+    if filters.namespace_mode == "namespaced":
+        predicates.append("system:has namespace")
+    elif filters.namespace_mode == "unnamespaced":
+        predicates.append("system:no namespace")
+
+    if filters.archive_mode == "archived":
+        predicates.append("system:archived")
+    elif filters.archive_mode == "inbox":
+        predicates.append("system:inbox")
+
+    if filters.date_added_days_ago_max is not None:
+        predicates.append(f"system:time imported since {int(filters.date_added_days_ago_max)} days ago")
+    if filters.date_added_days_ago_min and filters.date_added_days_ago_min > 0:
+        predicates.append(f"system:time imported before {int(filters.date_added_days_ago_min)} days ago")
+
+    return predicates
+
+
+def _needs_metadata_post_filter(filters: FilterParams) -> bool:
+    """Whether aspect_ratio/pixel_count/rating_count are narrow enough to be worth fetching
+    per-file metadata for. Hydrus has no native 'aspect ratio'/'pixel count'/'rating count'
+    range predicate, so these three are always applied client-side against fetched metadata
+    (per the spec doc's suggested fallback) - this just skips that fetch when every one of the
+    three bands is wide open (the common "not filtering on this axis" case from the UI)."""
+    return not (
+        filters.aspect_ratio_min <= 0 and filters.aspect_ratio_max == float("inf")
+        and filters.pixel_count_min <= 0 and filters.pixel_count_max == float("inf")
+        and filters.rating_count_min <= 0 and filters.rating_count_max == float("inf")
+    )
+
+
+def _file_passes_metadata_filters(metadata: dict[str, Any], filters: FilterParams) -> bool:
+    width = metadata.get("width") or 0
+    height = metadata.get("height") or 0
+    if width > 0 and height > 0:
+        aspect_ratio = width / height
+        pixel_count = width * height
+        if not (filters.aspect_ratio_min <= aspect_ratio <= filters.aspect_ratio_max):
+            return False
+        if not (filters.pixel_count_min <= pixel_count <= filters.pixel_count_max):
+            return False
+
+    # Hydrus has no per-file "rating count" concept comparable across rating-service types
+    # (like/dislike ratings are boolean, numerical ratings are a single star value); as a
+    # stand-in metric, count how many tags (across all tag services) currently sit on the file.
+    rating_count = sum(
+        len(service_tags.get("display_tags", {}).get("0", []))
+        for service_tags in (metadata.get("tags") or {}).values()
+    )
+    if not (filters.rating_count_min <= rating_count <= filters.rating_count_max):
+        return False
+
+    return True
+
+
+def _filtered_tag_file_count(tag: str, client: hydrus_api.Client, filters: FilterParams) -> int:
+    """Number of files matching `tag` plus every non-tag filter axis in `filters`."""
+    from tagrank.hydrus_client import get_file_infos_from_client  # local import: avoid a cycle
+
+    predicates = [tag] + _base_system_predicates(filters)
+    search_kwargs: dict[str, Any] = {}
+    if filters.file_service_keys:
+        search_kwargs["file_service_keys"] = filters.file_service_keys
+
+    tag_service_keys: list[str | None] = list(filters.tag_service_keys) if filters.tag_service_keys else [None]
+    file_ids: set[int] = set()
+    for tag_service_key in tag_service_keys:
+        kwargs = dict(search_kwargs)
+        if tag_service_key:
+            kwargs["tag_service_key"] = tag_service_key
+        try:
+            resp = client.search_files(predicates, return_file_ids=True, **kwargs)
+        except Exception as e:
+            logger.error(f"Filtered search for tag '{tag}' failed: {e}")
+            return 0
+        file_ids.update(resp.get("file_ids") or [])
+
+    if not file_ids or not _needs_metadata_post_filter(filters):
+        return len(file_ids)
+
+    file_infos = get_file_infos_from_client(client, list(file_ids))
+    return sum(1 for _fid, metadata in file_infos if _file_passes_metadata_filters(metadata, filters))
+
+
+def build_filtered_search_options(client: hydrus_api.Client, filters: FilterParams) -> SearchOptions:
+    """DB Search variant of build_search_options: same TrueSkill-ranked Top/Random/Bottom
+    tag picker, but each candidate tag is first narrowed by a fresh Hydrus search combining
+    the tag with every filter axis in `filters` (see plans/undertow-filtered-search-api.md).
+    An empty result after filtering is a normal empty SearchOptions, not an error - only a
+    genuinely broken input (unknown service key) or Hydrus-side failure raises."""
+    _validate_service_keys(client, filters)
+
+    ratings = load_ratings()
+    filter_tag_lower = filters.filter_tag.strip().lower()
+    candidate_tags = [
+        tag for tag in ratings
+        if not tag.startswith("filename:") and not is_filtered_tag(tag)
+        and (filter_tag_lower in tag.lower() if filter_tag_lower else True)
+    ]
+
+    entries: list[tuple[str, float, int]] = []
+    for tag in candidate_tags:
+        score = trueskill_score(ratings[tag])
+        if not (filters.score_min <= score <= filters.score_max):
+            continue
+        file_count = _filtered_tag_file_count(tag, client, filters)
+        if file_count < filters.min_files:
+            continue
+        entries.append((tag, score, file_count))
+
+    return _bucket_top_random_bottom(entries)
 
 
 def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
@@ -243,11 +410,12 @@ def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:
 
 # ------------------------- pool assembly -------------------------
 
-def get_candidate_seeds(query: list[str], n: int, client: hydrus_api.Client) -> list[str]:
+def get_candidate_seeds(query: list[str], n: int, client: hydrus_api.Client, file_service_key: str = "") -> list[str]:
     """One-shot fetch of up to `n` candidate hashes matching `query`."""
     final_query = query + [f"system:limit = {n}"]
     try:
-        resp = client.search_files(final_query, return_hashes=True)
+        kwargs = {"file_service_keys": [file_service_key]} if file_service_key else {}
+        resp = client.search_files(final_query, return_hashes=True, **kwargs)
         hashes = list(resp.get("hashes") or [])
         logger.info(f"Fetched {len(hashes)} candidate seeds.")
         return hashes
@@ -258,10 +426,12 @@ def get_candidate_seeds(query: list[str], n: int, client: hydrus_api.Client) -> 
 
 def build_pool(client: hydrus_api.Client | None = None,
                pool_size: int = POOL_SIZE,
-               query: list[str] | None = None) -> list[str]:
+               query: list[str] | None = None,
+               file_service_key: str = FILE_SERVICE_KEY) -> list[str]:
     client = client or _get_default_client()
     if query is None:
         query = _legacy_seed_predicates()
+    search_kwargs = {"file_service_keys": [file_service_key]} if file_service_key else {}
 
     logger.info(f"Building pool of {pool_size} files (starting distance: {MAX_DISTANCE_START}, max: {MAX_DISTANCE_HARD})...")
 
@@ -270,20 +440,20 @@ def build_pool(client: hydrus_api.Client | None = None,
     # nothing to filter down from. Just use every file that has the tag.
     if len(query) == 1 and not query[0].startswith("system:"):
         tag = query[0]
-        available = get_tag_file_count(tag, client)
+        available = get_tag_file_count(tag, client, file_service_key)
         if 0 < available < pool_size:
             logger.info(
                 f"Tag '{tag}' only has {available} files, fewer than the requested {pool_size}; "
                 f"bypassing similarity filtering and using all {available} files."
             )
             try:
-                resp = client.search_files(query, return_hashes=True)
+                resp = client.search_files(query, return_hashes=True, **search_kwargs)
                 return list(resp.get("hashes") or [])
             except Exception as e:
                 logger.error(f"Bypass search for tag '{tag}' failed: {e}")
                 return []
 
-    candidates = get_candidate_seeds(query, CANDIDATE_SEED_COUNT, client)
+    candidates = get_candidate_seeds(query, CANDIDATE_SEED_COUNT, client, file_service_key)
     if not candidates:
         logger.error("No candidate seeds returned from API. Aborting.")
         return []
@@ -341,7 +511,7 @@ def build_pool(client: hydrus_api.Client | None = None,
             predicates.append(f"system:similar to {seed} with distance {distance}")
             predicates.append(f"system:limit = {pool_size * API_LIMIT_FUZZ}")
             try:
-                resp = client.search_files(predicates, return_hashes=True)
+                resp = client.search_files(predicates, return_hashes=True, **search_kwargs)
                 similar_hashes = list(resp.get("hashes") or [])
             except Exception as e:
                 print()
