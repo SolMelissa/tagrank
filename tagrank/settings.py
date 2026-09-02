@@ -10,7 +10,14 @@ one and rebuilds-and-swaps the whole tree on an edit rather than mutating fields
 
 from dataclasses import dataclass, replace
 
-from config import get_bool, get_float_or_none, get_int, get_list, key, set_and_persist
+from config import get, get_bool, get_float_or_none, get_int, get_list, key, set_and_persist, set_and_persist_key
+
+
+def _effective_key(raw: str) -> str:
+    """Placeholder values ("FILL_ME_IN", blank) mean "not configured" - normalize both to ""
+    so callers can just do `if settings.hydrus.tag_service_key:` / `if ...file_service_key:`."""
+    value = raw.strip()
+    return "" if value in ("", "FILL_ME_IN") else value
 
 
 @dataclass(frozen=True)
@@ -20,6 +27,8 @@ class HydrusKeys:
     rating_service_key: str
     mmr_service_key: str
     mmr_confidence_service_key: str
+    tag_service_key: str
+    badge_tag_service_key: str  # where TagRankSort:N + MMR tags get written; "" = tag_service_key, then "my tags"
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,7 @@ class PoolSettings:
     api_limit_fuzz: int
     pool_strategy: str  # one of POOL_STRATEGIES
     max_tournament_size: int
+    file_service_key: str  # which Hydrus file domain/service to search; "" = Hydrus's default
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,8 @@ def load_settings() -> Settings:
             rating_service_key=key("RATING_SERVICE_KEY").strip(),
             mmr_service_key=key("TAGRANK_MMR_SERVICE_KEY", "").strip(),
             mmr_confidence_service_key=key("TAGRANK_MMR_CONFIDENCE_SERVICE_KEY", "").strip(),
+            tag_service_key=_effective_key(key("TAG_SERVICE_KEY", "")),
+            badge_tag_service_key=_effective_key(key("TAGRANK_BADGE_TAG_SERVICE_KEY", "")),
         ),
         search=SearchSettings(
             search_query=get_list("SEARCH_QUERY", []),
@@ -102,6 +114,7 @@ def load_settings() -> Settings:
             api_limit_fuzz=get_int("API_LIMIT_FUZZ", 2),
             pool_strategy=_get_pool_strategy(),
             max_tournament_size=get_int("MAX_TOURNAMENT_SIZE", 64),
+            file_service_key=_effective_key(get("FILE_SERVICE_KEY", "")),
         ),
         distance=DistanceSettings(
             max_distance_start=get_int("MAX_DISTANCE_START", 10),
@@ -133,15 +146,21 @@ def load_settings() -> Settings:
 # headless API both read/write through the same store, so they're two views of one model.
 # --------------------------------------------------------------------------------------
 
-# Maps a dotted "section.field" path (as used by the settings panel/API) to the
-# config/SETTINGS key it should be persisted under.
+# Maps a dotted "section.field" path (as used by the settings panel/API) to the config key it
+# should be persisted under. Every entry here lives in config/SETTINGS except the "hydrus.*"
+# ones below, which persist to config/KEYS instead (see SettingsStore.update) - they're Hydrus
+# service identifiers, not real secrets, but live alongside API_KEY/RATING_SERVICE_KEY for
+# historical reasons.
 _SETTINGS_KEYS: dict[str, str] = {
+    "hydrus.tag_service_key": "TAG_SERVICE_KEY",
+    "hydrus.badge_tag_service_key": "TAGRANK_BADGE_TAG_SERVICE_KEY",
     "pool.pool_size": "POOL_SIZE",
     "pool.candidate_seed_count": "CANDIDATE_SEED_COUNT",
     "pool.seed_count_for_query": "SEED_COUNT_FOR_QUERY",
     "pool.api_limit_fuzz": "API_LIMIT_FUZZ",
     "pool.pool_strategy": "POOL_STRATEGY",
     "pool.max_tournament_size": "MAX_TOURNAMENT_SIZE",
+    "pool.file_service_key": "FILE_SERVICE_KEY",
     "distance.max_distance_start": "MAX_DISTANCE_START",
     "distance.distance_step": "DISTANCE_STEP",
     "distance.max_distance_hard": "MAX_DISTANCE_HARD",
@@ -172,6 +191,7 @@ class SettingsStore:
         """Apply {"pool.pool_size": 200, ...}-style edits, persist them, and swap in the
         rebuilt Settings. Unknown keys are ignored (defensive - a stale panel shouldn't crash
         a running session)."""
+        new_hydrus = self._settings.hydrus
         new_search = self._settings.search
         new_pool = self._settings.pool
         new_distance = self._settings.distance
@@ -181,6 +201,10 @@ class SettingsStore:
             if path not in _SETTINGS_KEYS:
                 continue
             section, field_name = path.split(".", 1)
+            if section == "hydrus":
+                new_hydrus = replace(new_hydrus, **{field_name: value})
+                set_and_persist_key(_SETTINGS_KEYS[path], value)
+                continue
             if section == "pool":
                 new_pool = replace(new_pool, **{field_name: value})
             elif section == "distance":
@@ -192,7 +216,7 @@ class SettingsStore:
             set_and_persist(_SETTINGS_KEYS[path], value)
 
         self._settings = replace(
-            self._settings, search=new_search, pool=new_pool, distance=new_distance, ui=new_ui
+            self._settings, hydrus=new_hydrus, search=new_search, pool=new_pool, distance=new_distance, ui=new_ui
         )
         return self._settings
 

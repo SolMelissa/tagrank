@@ -112,6 +112,33 @@ def set_and_persist(name: str, value: object) -> None:
     settings_p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def set_and_persist_key(name: str, value: object) -> None:
+    """Like set_and_persist, but for config/KEYS instead of config/SETTINGS - used for the
+    handful of hydrus.* fields (tag_service_key, badge_tag_service_key) that are Hydrus service
+    identifiers rather than real secrets, but still live in KEYS alongside API_KEY/RATING_
+    SERVICE_KEY for historical reasons. Same preserve-every-other-line rewrite behavior."""
+    global _KEYS
+    text_value = "" if value is None else str(value)
+    _get_keys()[name] = text_value
+
+    keys_p = CONFIG_DIR / "KEYS"
+    existing = keys_p.read_text(encoding="utf-8") if keys_p.exists() else ""
+    lines = existing.splitlines()
+    found = False
+    for i, raw in enumerate(lines):
+        if _strip_comment(raw).split("=", 1)[0].strip() == name:
+            comment = raw.split("#", 1)[1] if "#" in raw else None
+            new_line = f"{name} = {text_value}"
+            if comment is not None:
+                new_line += f" #{comment}"
+            lines[i] = new_line
+            found = True
+            break
+    if not found:
+        lines.append(f"{name} = {text_value}")
+    keys_p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def get_list(name: str, default: list[str]) -> list[str]:
     raw = get(name, "")
     if not raw:
@@ -173,6 +200,16 @@ API_KEY = FILL_ME_IN
 RATING_SERVICE_KEY = FILL_ME_IN
 TAGRANK_MMR_SERVICE_KEY = FILL_ME_IN
 TAGRANK_MMR_CONFIDENCE_SERVICE_KEY = FILL_ME_IN
+# Which real Hydrus tag service TagRank reads/writes tags for. Leave FILL_ME_IN (or blank)
+# to fall back to merging every tag service together - not recommended, since siblings only
+# resolve correctly within a single service and a merged view can show both a tag and its
+# sibling side by side. Find the key under services -> review services -> the service's tab.
+TAG_SERVICE_KEY = FILL_ME_IN
+# Local tag service TagRank writes its own badges (TagRankSort:N sort tags) and MMR-derived
+# tags to. Leave FILL_ME_IN (or blank) to fall back to TAG_SERVICE_KEY, then "my tags" - set
+# this to a dedicated local tag service (e.g. "tagrank badges") to keep TagRank's own bookkeeping
+# tags out of your real tag service.
+TAGRANK_BADGE_TAG_SERVICE_KEY = FILL_ME_IN
 # =============================================================
 """
 
@@ -191,6 +228,7 @@ SEED_COUNT_FOR_QUERY = 10      # how many seeds to rotate through when expanding
 API_LIMIT_FUZZ = 2             # over-fetch multiplier to survive dedup
 POOL_STRATEGY = random         # top | random | bottom | confidence_duel | divergence
 MAX_TOURNAMENT_SIZE = 64       # max images randomly drawn into a Tournament Mode bracket
+FILE_SERVICE_KEY =             # which Hydrus file domain/service to search; blank = Hydrus's default ("my files")
 
 # ====================== DISTANCE ESCALATION ======================
 MAX_DISTANCE_START = 10    # escalating floor; grows by DISTANCE_STEP below

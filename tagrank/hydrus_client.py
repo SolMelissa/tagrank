@@ -112,8 +112,15 @@ def get_file_infos_from_client(client: hydrus_api.Client, file_ids: list[int]) -
     return file_ids_to_tags
 
 
-def delete_existing_sort_tags_if_needed(client: hydrus_api.Client) -> None:
-    response = client.search_files(tags=["TagRankSort:*"])
+def delete_existing_sort_tags_if_needed(client: hydrus_api.Client, settings: Settings | None = None) -> None:
+    settings = settings or load_settings()
+    search_kwargs: dict = {}
+    badge_service_key = settings.hydrus.badge_tag_service_key or settings.hydrus.tag_service_key
+    if badge_service_key:
+        search_kwargs["tag_service_key"] = badge_service_key
+    if settings.pool.file_service_key:
+        search_kwargs["file_service_keys"] = [settings.pool.file_service_key]
+    response = client.search_files(tags=["TagRankSort:*"], **search_kwargs)
     if response is None or response["file_ids"] is None:
         print("I was not able to search for files or something went wrong when trying to.")
         print("Please check your permissions with the following help text.")

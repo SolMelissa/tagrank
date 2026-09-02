@@ -75,7 +75,7 @@ def run_for_rank_tags(client, settings: Settings, preset_tag: str | None = None)
         query = [preset_tag]
     else:
         query = prompt_for_search(client)  # numbered most-liked tags, 0 = custom search
-    hashes = build_pool(client=client, query=query)
+    hashes = build_pool(client=client, query=query, file_service_key=settings.pool.file_service_key)
     if not hashes:
         print_no_relevant_files_then_exit(query)
 
@@ -124,11 +124,16 @@ def run_for_rank_tags(client, settings: Settings, preset_tag: str | None = None)
 def run_for_create_image_ranking(client: hydrus_api.Client, settings: Settings) -> None:
     if hydrus_api.Permission.ADD_TAGS not in client.verify_access_key()["basic_permissions"]:
         print_add_tags_permissions_missing_info_then_exit()
-    delete_existing_sort_tags_if_needed(client)
+    delete_existing_sort_tags_if_needed(client, settings)
     rating_system = RatingSystem(client, [], settings)
     tags = list(rating_system.current_ratings.keys())
+    search_kwargs: dict = {}
+    if settings.hydrus.tag_service_key:
+        search_kwargs["tag_service_key"] = settings.hydrus.tag_service_key
+    if settings.pool.file_service_key:
+        search_kwargs["file_service_keys"] = [settings.pool.file_service_key]
     # noinspection PyTypeChecker
-    response = client.search_files(tags=[tags])
+    response = client.search_files(tags=[tags], **search_kwargs)
     if response is None or response["file_ids"] is None or len(response["file_ids"]) == 0:
         print_no_relevant_files_to_sort_then_exit()
     file_ids = [int(file_id) for file_id in response["file_ids"]]
@@ -141,15 +146,16 @@ def run_for_create_image_ranking(client: hydrus_api.Client, settings: Settings) 
     print("Now sorting the list by tagrankMMR...")
     sorted_file_infos = sort_files_by_mmr(file_infos, rating_system)
     print("Sorted the list. Now setting the sort-order tags in hydrus.")
-    services_response = client.get_services()
-    services_map = services_response["services"]
-    found_service_id = None
-    for service_id, service_data in services_map.items():
-        if service_data["type"] == hydrus_api.ServiceType.TAG_DOMAIN:
-            if found_service_id is None:
-                found_service_id = service_id
-            if service_data["name"] == "my tags":
-                found_service_id = service_id
+    found_service_id = settings.hydrus.badge_tag_service_key or settings.hydrus.tag_service_key or None
+    if found_service_id is None:
+        services_response = client.get_services()
+        services_map = services_response["services"]
+        for service_id, service_data in services_map.items():
+            if service_data["type"] == hydrus_api.ServiceType.TAG_DOMAIN:
+                if found_service_id is None:
+                    found_service_id = service_id
+                if service_data["name"] == "my tags":
+                    found_service_id = service_id
     for (index, (file_id, _)) in enumerate(sorted_file_infos):
         client.add_tags(file_ids=[file_id], service_keys_to_tags={found_service_id: [f"TagRankSort:{index}"]})
     print("Have sent all the tags to the client.")
