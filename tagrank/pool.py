@@ -25,6 +25,7 @@ queries).
 import json
 import logging
 import random
+import time
 from typing import Any, NamedTuple
 
 import hydrus_api
@@ -41,6 +42,7 @@ from config import (
     is_filtered_tag,
 )
 from tagrank.errors import UnknownServiceKeyError
+from tagrank.tag_index import FileRecord, TagIndex
 
 # --- pull settings out of config/KEYS and config/SETTINGS ---
 API_URL            = key("API_URL", "http://127.0.0.1:45869/")
@@ -179,26 +181,33 @@ def _bucket_top_random_bottom(entries: list[tuple[str, float, int]]) -> SearchOp
 def build_search_options(client: hydrus_api.Client | None = None, file_service_key: str = "") -> SearchOptions:
     """Pure data half of the search picker: ranks tags by TrueSkill score and buckets them
     into Top/Random/Bottom categories, same selection logic the CLI prompt renders. Used
-    directly by the API's /search-options endpoint, and by prompt_for_search() below."""
+    directly by the API's /search-options endpoint, and by prompt_for_search() below.
+
+    Computed from the in-memory tag_index (see tagrank/tag_index.py) rather than one live
+    Hydrus file-count round trip per rated tag - that per-request cost is what used to force
+    this endpoint's 180s timeout on a real library."""
     client = client or _get_default_client()
+    from tagrank.tag_index import ensure_index  # local import: avoid a cycle
+    index = ensure_index(client)
+    return build_search_options_from_index(index, file_service_key)
+
+
+def build_search_options_from_index(index: TagIndex, file_service_key: str = "") -> SearchOptions:
     ratings = load_ratings()
-
-    all_tags = [
-        tag for tag in ratings
-        if not tag.startswith("filename:") and not is_filtered_tag(tag)
-    ]
-
-    file_counts = {tag: get_tag_file_count(tag, client, file_service_key) for tag in all_tags}
-    if MIN_TAG_FILE_COUNT > 1:
-        dropped = sum(1 for tag in all_tags if file_counts[tag] < MIN_TAG_FILE_COUNT)
-        if dropped:
-            logger.info(
-                f"Hiding {dropped} tag(s) with fewer than {MIN_TAG_FILE_COUNT} files "
-                f"from the search picker (MIN_TAG_FILE_COUNT)."
+    entries: list[tuple[str, float, int]] = []
+    for tag, file_ids in index.tag_to_file_ids.items():
+        if tag not in ratings or tag.startswith("filename:") or is_filtered_tag(tag):
+            continue
+        if file_service_key:
+            count = sum(
+                1 for fid in file_ids
+                if (record := index.files.get(fid)) is not None and file_service_key in record.file_service_keys
             )
-        all_tags = [tag for tag in all_tags if file_counts[tag] >= MIN_TAG_FILE_COUNT]
-
-    entries = [(tag, trueskill_score(ratings[tag]), file_counts[tag]) for tag in all_tags]
+        else:
+            count = len(file_ids)
+        if count < MIN_TAG_FILE_COUNT:
+            continue
+        entries.append((tag, trueskill_score(ratings[tag]), count))
     return _bucket_top_random_bottom(entries)
 
 
@@ -236,122 +245,96 @@ def _validate_service_keys(client: hydrus_api.Client, filters: FilterParams) -> 
             raise UnknownServiceKeyError(service_key)
 
 
-def _base_system_predicates(filters: FilterParams) -> list[str]:
-    """system: predicates coverable directly by Hydrus's own search (namespace, archive/inbox,
-    date-imported) - see hydrus_client.py notes on why aspect_ratio/pixel_count/rating_count
-    are instead applied as a Python post-filter over fetched file metadata."""
-    predicates: list[str] = []
-    if filters.namespace_mode == "namespaced":
-        predicates.append("system:has namespace")
-    elif filters.namespace_mode == "unnamespaced":
-        predicates.append("system:no namespace")
-
-    if filters.archive_mode == "archived":
-        predicates.append("system:archived")
-    elif filters.archive_mode == "inbox":
-        predicates.append("system:inbox")
-
-    if filters.date_added_days_ago_max is not None:
-        predicates.append(f"system:time imported since {int(filters.date_added_days_ago_max)} days ago")
-    if filters.date_added_days_ago_min and filters.date_added_days_ago_min > 0:
-        predicates.append(f"system:time imported before {int(filters.date_added_days_ago_min)} days ago")
-
-    return predicates
-
-
-def _needs_metadata_post_filter(filters: FilterParams) -> bool:
-    """Whether aspect_ratio/pixel_count/rating_count are narrow enough to be worth fetching
-    per-file metadata for. Hydrus has no native 'aspect ratio'/'pixel count'/'rating count'
-    range predicate, so these three are always applied client-side against fetched metadata
-    (per the spec doc's suggested fallback) - this just skips that fetch when every one of the
-    three bands is wide open (the common "not filtering on this axis" case from the UI)."""
-    return not (
-        filters.aspect_ratio_min <= 0 and filters.aspect_ratio_max == float("inf")
-        and filters.pixel_count_min <= 0 and filters.pixel_count_max == float("inf")
-        and filters.rating_count_min <= 0 and filters.rating_count_max == float("inf")
-    )
-
-
-def _file_passes_metadata_filters(metadata: dict[str, Any], filters: FilterParams) -> bool:
-    width = metadata.get("width") or 0
-    height = metadata.get("height") or 0
-    if width > 0 and height > 0:
-        aspect_ratio = width / height
-        pixel_count = width * height
-        if not (filters.aspect_ratio_min <= aspect_ratio <= filters.aspect_ratio_max):
-            return False
-        if not (filters.pixel_count_min <= pixel_count <= filters.pixel_count_max):
-            return False
-
-    # Hydrus has no per-file "rating count" concept comparable across rating-service types
-    # (like/dislike ratings are boolean, numerical ratings are a single star value); as a
-    # stand-in metric, count how many tags (across all tag services) currently sit on the file.
-    rating_count = sum(
-        len(service_tags.get("display_tags", {}).get("0", []))
-        for service_tags in (metadata.get("tags") or {}).values()
-    )
-    if not (filters.rating_count_min <= rating_count <= filters.rating_count_max):
-        return False
-
-    return True
-
-
-def _filtered_tag_file_count(tag: str, client: hydrus_api.Client, filters: FilterParams) -> int:
-    """Number of files matching `tag` plus every non-tag filter axis in `filters`."""
-    from tagrank.hydrus_client import get_file_infos_from_client  # local import: avoid a cycle
-
-    predicates = [tag] + _base_system_predicates(filters)
-    search_kwargs: dict[str, Any] = {}
-    if filters.file_service_keys:
-        search_kwargs["file_service_keys"] = filters.file_service_keys
-
-    tag_service_keys: list[str | None] = list(filters.tag_service_keys) if filters.tag_service_keys else [None]
-    file_ids: set[int] = set()
-    for tag_service_key in tag_service_keys:
-        kwargs = dict(search_kwargs)
-        if tag_service_key:
-            kwargs["tag_service_key"] = tag_service_key
-        try:
-            resp = client.search_files(predicates, return_file_ids=True, **kwargs)
-        except Exception as e:
-            logger.error(f"Filtered search for tag '{tag}' failed: {e}")
-            return 0
-        file_ids.update(resp.get("file_ids") or [])
-
-    if not file_ids or not _needs_metadata_post_filter(filters):
-        return len(file_ids)
-
-    file_infos = get_file_infos_from_client(client, list(file_ids))
-    return sum(1 for _fid, metadata in file_infos if _file_passes_metadata_filters(metadata, filters))
-
-
 def build_filtered_search_options(client: hydrus_api.Client, filters: FilterParams) -> SearchOptions:
     """DB Search variant of build_search_options: same TrueSkill-ranked Top/Random/Bottom
-    tag picker, but each candidate tag is first narrowed by a fresh Hydrus search combining
-    the tag with every filter axis in `filters` (see plans/undertow-filtered-search-api.md).
-    An empty result after filtering is a normal empty SearchOptions, not an error - only a
-    genuinely broken input (unknown service key) or Hydrus-side failure raises."""
+    tag picker, but each candidate tag is first narrowed by every filter axis in `filters`.
+    Computed entirely from the in-memory tag_index (see tagrank/tag_index.py) rather than a
+    fresh Hydrus round trip per candidate tag - that per-request live-query design was slow
+    enough on a real library to make Undertow's DB Search button "just spin". An empty result
+    after filtering is a normal empty SearchOptions, not an error - only a genuinely broken
+    input (unknown service key) raises."""
     _validate_service_keys(client, filters)
+    from tagrank.tag_index import ensure_index  # local import: avoid a cycle (tag_index imports us)
+    index = ensure_index(client)
+    return build_filtered_search_options_from_index(index, filters)
 
+
+def build_filtered_search_options_from_index(index: TagIndex, filters: FilterParams) -> SearchOptions:
     ratings = load_ratings()
     filter_tag_lower = filters.filter_tag.strip().lower()
-    candidate_tags = [
-        tag for tag in ratings
-        if not tag.startswith("filename:") and not is_filtered_tag(tag)
-        and (filter_tag_lower in tag.lower() if filter_tag_lower else True)
-    ]
 
     entries: list[tuple[str, float, int]] = []
-    for tag in candidate_tags:
+    for tag, file_ids in index.tag_to_file_ids.items():
+        if tag not in ratings or tag.startswith("filename:") or is_filtered_tag(tag):
+            continue
+        if filter_tag_lower and filter_tag_lower not in tag.lower():
+            continue
         score = trueskill_score(ratings[tag])
         if not (filters.score_min <= score <= filters.score_max):
             continue
-        file_count = _filtered_tag_file_count(tag, client, filters)
+        file_count = sum(
+            1 for fid in file_ids
+            if (record := index.files.get(fid)) is not None and _file_record_passes_filters(tag, record, filters)
+        )
         if file_count < filters.min_files:
             continue
         entries.append((tag, score, file_count))
 
     return _bucket_top_random_bottom(entries)
+
+
+def _file_record_passes_filters(tag: str, record: FileRecord, filters: FilterParams) -> bool:
+    """tag_index.FileRecord equivalent of _file_passes_metadata_filters, extended to also
+    cover the axes that used to be baked into the live Hydrus search predicate (tag/file
+    service membership, namespace, archive status, date added) - all doable client-side now
+    that a full per-file record is cached rather than re-derived per request."""
+    if filters.tag_service_keys and not any(
+        tag in record.tags_by_service.get(tsk, ()) for tsk in filters.tag_service_keys
+    ):
+        return False
+    if filters.file_service_keys and not (record.file_service_keys & set(filters.file_service_keys)):
+        return False
+
+    all_tags = set().union(*record.tags_by_service.values()) if record.tags_by_service else set()
+    has_namespace = any(":" in t and t.split(":", 1)[0] for t in all_tags)
+    if filters.namespace_mode == "namespaced" and not has_namespace:
+        return False
+    if filters.namespace_mode == "unnamespaced" and has_namespace:
+        return False
+
+    if filters.archive_mode == "archived" and record.is_inbox:
+        return False
+    if filters.archive_mode == "inbox" and not record.is_inbox:
+        return False
+
+    relevant_times = (
+        [t for k, t in record.import_times.items() if k in filters.file_service_keys]
+        if filters.file_service_keys else list(record.import_times.values())
+    )
+    if relevant_times:
+        # Earliest import among the relevant services - "added" means first added anywhere
+        # in scope, mirroring the plain (no explicit service filter) common case of one
+        # local file service.
+        import_time = min(relevant_times)
+        days_ago = (time.time() - import_time) / 86400.0
+        if filters.date_added_days_ago_max is not None and days_ago > filters.date_added_days_ago_max:
+            return False
+        if filters.date_added_days_ago_min and days_ago < filters.date_added_days_ago_min:
+            return False
+
+    if record.width > 0 and record.height > 0:
+        aspect_ratio = record.width / record.height
+        pixel_count = record.width * record.height
+        if not (filters.aspect_ratio_min <= aspect_ratio <= filters.aspect_ratio_max):
+            return False
+        if not (filters.pixel_count_min <= pixel_count <= filters.pixel_count_max):
+            return False
+
+    rating_count = sum(len(v) for v in record.tags_by_service.values())
+    if not (filters.rating_count_min <= rating_count <= filters.rating_count_max):
+        return False
+
+    return True
 
 
 def prompt_for_search(client: hydrus_api.Client | None = None) -> list[str]:

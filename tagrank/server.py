@@ -21,9 +21,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from tagrank import pool, service
+from tagrank import pool, service, tag_index
 from tagrank.errors import TagRankError, UnknownServiceKeyError
+from tagrank.hydrus_client import create_client
 from tagrank.service import NoPairAvailableError, Session, SessionNotFoundError
+from tagrank.settings import load_settings
 
 app = FastAPI(
     title="TagRank API",
@@ -34,6 +36,24 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
+
+@app.on_event("startup")
+def _build_tag_index_on_startup() -> None:
+    """Pulls every rated tag's file membership + metadata once, up front, so the first
+    /search-options or /search-options/filtered call doesn't pay that cost itself (see
+    tagrank/tag_index.py). Runs synchronously before uvicorn starts accepting requests -
+    Undertow's tagrank_client already budgets generous startup headroom
+    (STARTUP_DEADLINE_SECONDS) for exactly this kind of one-time cost. Best-effort: a failure
+    here (e.g. Hydrus not reachable yet) just leaves the index empty, and it gets built lazily
+    on first use instead via ensure_index()."""
+    try:
+        settings = load_settings()
+        client = create_client(settings)
+        tag_index.ensure_index(client)
+    except Exception as e:  # noqa: BLE001 - startup must not crash the server over this
+        import logging
+        logging.getLogger(__name__).error(f"Eager tag-index build failed, will retry lazily: {e}")
 
 
 # --------------------------------------------------------------------------------------

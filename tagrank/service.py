@@ -271,10 +271,10 @@ def get_search_options(client: hydrus_api.Client | None = None, settings: Settin
 def get_filtered_search_options(
     filters: pool.FilterParams, client: hydrus_api.Client | None = None, settings: Settings | None = None,
 ) -> pool.SearchOptions:
-    """DB Search variant of get_search_options: narrows the Top/Random/Bottom tag picker by a
-    fresh Hydrus search per candidate tag (score/resolution/rating-count/date/namespace/archive/
-    service-key filters) instead of the unfiltered candidate-seed logic. Used by
-    POST /search-options/filtered."""
+    """DB Search variant of get_search_options: narrows the Top/Random/Bottom tag picker by
+    every filter axis (score/resolution/rating-count/date/namespace/archive/service-key),
+    computed from the cached tag_index rather than a fresh Hydrus search per candidate tag.
+    Used by POST /search-options/filtered."""
     settings = settings or load_settings()
     client = client or create_client(settings)
     return pool.build_filtered_search_options(client, filters)
