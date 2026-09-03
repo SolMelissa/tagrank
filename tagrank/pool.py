@@ -274,7 +274,7 @@ def build_filtered_search_options_from_index(index: TagIndex, filters: FilterPar
             continue
         file_count = sum(
             1 for fid in file_ids
-            if (record := index.files.get(fid)) is not None and _file_record_passes_filters(tag, record, filters)
+            if _file_record_passes_filters(tag, index.files.get(fid), filters)
         )
         if file_count < filters.min_files:
             continue
@@ -283,11 +283,34 @@ def build_filtered_search_options_from_index(index: TagIndex, filters: FilterPar
     return _bucket_top_random_bottom(entries)
 
 
-def _file_record_passes_filters(tag: str, record: FileRecord, filters: FilterParams) -> bool:
+def _filters_need_file_metadata(filters: FilterParams) -> bool:
+    """Whether any active filter axis actually needs a file's cached metadata to evaluate -
+    tag/file service membership, namespace, archive status, date added, resolution, rating
+    count. A default/unset value on every one of those axes means "no restriction", so a file
+    whose FileRecord never got cached (see _build_index's metadata fetch) can still count
+    instead of being silently dropped for a search that never needed its metadata."""
+    return bool(
+        filters.tag_service_keys or filters.file_service_keys
+        or filters.namespace_mode != "all" or filters.archive_mode != "all"
+        or filters.date_added_days_ago_min or filters.date_added_days_ago_max is not None
+        or filters.aspect_ratio_min > 0.0 or filters.aspect_ratio_max != float("inf")
+        or filters.pixel_count_min > 0.0 or filters.pixel_count_max != float("inf")
+        or filters.rating_count_min > 0.0 or filters.rating_count_max != float("inf")
+    )
+
+
+def _file_record_passes_filters(tag: str, record: FileRecord | None, filters: FilterParams) -> bool:
     """tag_index.FileRecord equivalent of _file_passes_metadata_filters, extended to also
     cover the axes that used to be baked into the live Hydrus search predicate (tag/file
     service membership, namespace, archive status, date added) - all doable client-side now
-    that a full per-file record is cached rather than re-derived per request."""
+    that a full per-file record is cached rather than re-derived per request.
+
+    record can be None when a file matched a tag search but its metadata never made it into
+    the index (see tag_index._build_index) - such a file passes here unless some filter axis
+    that actually needs metadata is active, rather than being dropped from every filtered
+    count unconditionally."""
+    if record is None:
+        return not _filters_need_file_metadata(filters)
     if filters.tag_service_keys and not any(
         tag in record.tags_by_service.get(tsk, ()) for tsk in filters.tag_service_keys
     ):
@@ -295,8 +318,7 @@ def _file_record_passes_filters(tag: str, record: FileRecord, filters: FilterPar
     if filters.file_service_keys and not (record.file_service_keys & set(filters.file_service_keys)):
         return False
 
-    all_tags = set().union(*record.tags_by_service.values()) if record.tags_by_service else set()
-    has_namespace = any(":" in t and t.split(":", 1)[0] for t in all_tags)
+    has_namespace = ":" in tag and bool(tag.split(":", 1)[0])
     if filters.namespace_mode == "namespaced" and not has_namespace:
         return False
     if filters.namespace_mode == "unnamespaced" and has_namespace:

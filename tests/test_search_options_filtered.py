@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from tagrank import pool
+from tagrank import pool, tag_index
 from tagrank.errors import UnknownServiceKeyError
 from tagrank.server import app
 
@@ -34,6 +34,13 @@ def _wide_open_filters(**overrides) -> pool.FilterParams:
 
 
 class BuildFilteredSearchOptionsTests(unittest.TestCase):
+    def setUp(self):
+        # ensure_index() caches its result in a module-level singleton (see tag_index.py) so
+        # that a real server only ever pays the index-build cost once - but that means two
+        # tests using different FakeFilterClient data would silently share whichever one
+        # happened to build the index first unless it's reset here.
+        tag_index._index = None
+
     def test_happy_path_ranks_and_counts_filtered_files(self):
         ratings = {"character:mario": (30.0, 1.0), "character:luigi": (10.0, 1.0)}
         client = FakeFilterClient(files_by_tag={"character:mario": [1, 2, 3], "character:luigi": [4]})
@@ -114,37 +121,47 @@ class BuildFilteredSearchOptionsTests(unittest.TestCase):
                     client, _wide_open_filters(file_service_keys=["not-a-real-service"]),
                 )
 
-    def test_namespace_mode_forwarded_as_system_predicate(self):
-        ratings = {"character:mario": (30.0, 1.0)}
-        seen_predicates = {}
-
-        class RecordingClient(FakeFilterClient):
-            def search_files(self, tags, return_file_ids=None, return_hashes=None, **kwargs):
-                seen_predicates["predicates"] = list(tags)
-                return super().search_files(tags, return_file_ids, return_hashes, **kwargs)
-
-        client = RecordingClient(files_by_tag={"character:mario": [1]})
-
-        with patch.object(pool, "load_ratings", return_value=ratings):
-            pool.build_filtered_search_options(client, _wide_open_filters(namespace_mode="namespaced"))
-
-        self.assertIn("system:has namespace", seen_predicates["predicates"])
-
-    def test_archive_mode_forwarded_as_system_predicate(self):
-        ratings = {"character:mario": (30.0, 1.0)}
-        seen_predicates = {}
-
-        class RecordingClient(FakeFilterClient):
-            def search_files(self, tags, return_file_ids=None, return_hashes=None, **kwargs):
-                seen_predicates["predicates"] = list(tags)
-                return super().search_files(tags, return_file_ids, return_hashes, **kwargs)
-
-        client = RecordingClient(files_by_tag={"character:mario": [1]})
+    def test_namespace_mode_filters_by_the_candidate_tag_not_the_files_other_tags(self):
+        # character:mario is namespaced, plain:mushroom is not - each file only carries its own
+        # tag in this test's metadata, so namespace filtering must key off the tag being scored
+        # (the pill itself), not off whatever other tags happen to live on the same file.
+        ratings = {"character:mario": (30.0, 1.0), "plain": (20.0, 1.0)}
+        metadata_by_id = {
+            1: {"file_id": 1, "width": 0, "height": 0, "tags": {}},
+            2: {"file_id": 2, "width": 0, "height": 0, "tags": {}},
+        }
+        client = FakeFilterClient(
+            files_by_tag={"character:mario": [1], "plain": [2]}, metadata_by_id=metadata_by_id,
+        )
 
         with patch.object(pool, "load_ratings", return_value=ratings):
-            pool.build_filtered_search_options(client, _wide_open_filters(archive_mode="inbox"))
+            namespaced = pool.build_filtered_search_options(
+                client, _wide_open_filters(namespace_mode="namespaced", min_files=1),
+            )
+        with patch.object(pool, "load_ratings", return_value=ratings):
+            tag_index._index = None
+            unnamespaced = pool.build_filtered_search_options(
+                client, _wide_open_filters(namespace_mode="unnamespaced", min_files=1),
+            )
 
-        self.assertIn("system:inbox", seen_predicates["predicates"])
+        namespaced_tags = {o.tag for o in namespaced.top + namespaced.random + namespaced.bottom}
+        unnamespaced_tags = {o.tag for o in unnamespaced.top + unnamespaced.random + unnamespaced.bottom}
+        self.assertEqual(namespaced_tags, {"character:mario"})
+        self.assertEqual(unnamespaced_tags, {"plain"})
+
+    def test_archive_mode_filters_by_file_inbox_status(self):
+        ratings = {"character:mario": (30.0, 1.0)}
+        metadata_by_id = {
+            1: {"file_id": 1, "width": 0, "height": 0, "tags": {}, "is_inbox": True},
+            2: {"file_id": 2, "width": 0, "height": 0, "tags": {}, "is_inbox": False},
+        }
+        client = FakeFilterClient(files_by_tag={"character:mario": [1, 2]}, metadata_by_id=metadata_by_id)
+
+        with patch.object(pool, "load_ratings", return_value=ratings):
+            inbox_only = pool.build_filtered_search_options(client, _wide_open_filters(archive_mode="inbox"))
+
+        tags = {o.tag: o for o in inbox_only.top}
+        self.assertEqual(tags["character:mario"].file_count, 1)
 
 
 class FilteredSearchOptionsEndpointTests(unittest.TestCase):
