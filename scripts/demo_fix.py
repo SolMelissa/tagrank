@@ -3,6 +3,9 @@
 Demo showing the fixed dashboard behavior:
 - On first run (no prediction_log.json): Shows 4 charts with 3 placeholders
 - After rating sessions: Shows 4 charts with actual data
+
+Manual demo script, not part of the pytest suite - run directly with
+`python scripts/demo_fix.py`.
 """
 
 import sys

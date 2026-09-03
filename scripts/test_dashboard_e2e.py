@@ -3,6 +3,9 @@
 End-to-end test for the session summary dashboard.
 Generates sample prediction log data and displays the analytics charts.
 Run with: python test_dashboard_e2e.py
+
+Manual e2e script, not part of the pytest suite (it opens matplotlib figures
+for visual inspection) - run directly with `python scripts/test_dashboard_e2e.py`.
 """
 
 import json
