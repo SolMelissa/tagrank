@@ -5,9 +5,9 @@ from tagrank.settings import PoolSettings, SearchSettings, DistanceSettings, Hyd
 
 def _fake_settings() -> Settings:
     return Settings(
-        hydrus=HydrusKeys(api_url="", api_key="", rating_service_key="", mmr_service_key="", mmr_confidence_service_key="", badge_tag_service_key=""),
+        hydrus=HydrusKeys(api_url="", api_key="", rating_service_key="", mmr_service_key="", mmr_confidence_service_key="", tag_service_key="", badge_tag_service_key=""),
         search=SearchSettings(search_query=[], default_file_query=[]),
-        pool=PoolSettings(pool_size=100, candidate_seed_count=1000, seed_count_for_query=10, api_limit_fuzz=2, pool_strategy="random", max_tournament_size=64),
+        pool=PoolSettings(pool_size=100, candidate_seed_count=1000, seed_count_for_query=10, api_limit_fuzz=2, pool_strategy="random", max_tournament_size=64, file_service_key=""),
         distance=DistanceSettings(max_distance_start=10, distance_step=2, max_distance_hard=64, min_pool_satisfied=None),
         ui=UiSettings(top_tag_options=20, bottom_tag_options=10, random_tag_options=10, min_tag_file_count=1, amount_of_tags_in_charts=20, debug_mode=True, confidence_sigma_threshold=3.0, rising_star_feed_enabled=True, underdog_alerts_enabled=True),
     )

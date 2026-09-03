@@ -231,6 +231,8 @@ def _run_start_session(
         _jobs[job_id] = JobStatus(job_id=job_id, status="ready", session_id=session.id)
     except TagRankError as e:
         _jobs[job_id] = JobStatus(job_id=job_id, status="error", error=str(e))
+    except Exception as e:  # noqa: BLE001 - background thread has no other way to surface this
+        _jobs[job_id] = JobStatus(job_id=job_id, status="error", error=str(e))
 
 
 @app.post(

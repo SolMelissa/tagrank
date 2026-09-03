@@ -74,8 +74,9 @@ class ComparisonFlowTests(unittest.TestCase):
             service.submit_result(session, "left")
 
         log_mock.assert_called_once_with(left, right, "A")
-        # winner/loser ratings pushed to Hydrus via write_choice -> client.set_rating
-        self.assertEqual(len(session.client.writes), 2)
+        # winner/loser ratings pushed to Hydrus via write_choice -> client.set_rating, plus
+        # per-file MMR rating and MMR confidence writes (2 files x 3 services = 6 writes).
+        self.assertEqual(len(session.client.writes), 6)
         # the pending pair is cleared, so a second submit without a new next-pair call fails
         with self.assertRaises(NoPairAvailableError):
             service.submit_result(session, "left")
