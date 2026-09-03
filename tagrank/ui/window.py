@@ -1,6 +1,5 @@
 """The comparison Window widget: shows two candidate files side by side."""
 
-import contextlib
 import os
 from typing import Callable
 
@@ -633,9 +632,10 @@ class Window(QtWidgets.QMainWindow):
             os.startfile(file_path_left)
             os.startfile(file_path_right)
         except AttributeError:
-            with contextlib.redirect_stdout:
-                QtGui.QDesktopServices.openUrl(file_path_left)
-                QtGui.QDesktopServices.openUrl(file_path_right)
+            # os.startfile only exists on Windows; on other platforms fall back to Qt's
+            # cross-platform opener. QDesktopServices.openUrl needs a QUrl, not a str.
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(file_path_left))
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(file_path_right))
 
     def exit(self) -> None:
         self.close()

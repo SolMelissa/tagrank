@@ -311,8 +311,18 @@ def get_session_graphs(
         "Final Tag Rankings by TrueSkill Score",
     ]
     results = []
-    for title, figure in zip(titles, figures):
-        buf = io.BytesIO()
-        figure.savefig(buf, format="png", dpi=110)
-        results.append({"title": title, "png_base64": base64.b64encode(buf.getvalue()).decode("ascii")})
+    try:
+        for title, figure in zip(titles, figures):
+            buf = io.BytesIO()
+            figure.savefig(buf, format="png", dpi=110)
+            results.append({"title": title, "png_base64": base64.b64encode(buf.getvalue()).decode("ascii")})
+    finally:
+        # Each call to build_session_summary_figures() registers new Figure objects with
+        # pyplot's global figure manager; unlike summary_dashboard.py (which closes the old
+        # figure on every refresh), nothing here ever reclaims them. Left unclosed, repeated
+        # GET /history/graphs calls against a long-running --serve process leak memory
+        # without bound.
+        import matplotlib.pyplot as plt  # local import: keep Agg backend selection above authoritative
+        for figure in figures:
+            plt.close(figure)
     return results
