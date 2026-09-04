@@ -7,6 +7,14 @@ large library. That per-request cost is what made Undertow's filter bar "just sp
 paid once here, and reused. See tagrank_picker.html / undertow's tagrank_client.py for the
 UI side of this.
 
+Built as one whole-library search plus one chunked metadata fetch, not one search per rated
+tag. An earlier version of this file did search per tag - even parallelized across several
+workers, that's still O(rated tags) separate full-library Hydrus searches, which stayed in the
+minutes range with a few thousand rated tags. /get_files/file_metadata already returns each
+file's complete tag list, so the tag -> file_ids mapping can instead be built locally by
+inverting that - O(1) search plus O(files / chunk size) metadata calls, independent of how many
+tags are rated.
+
 Rating a file doesn't change which files have which tags, so nothing here needs to be
 invalidated when a comparison is judged - only a fresh server start (or explicit
 refresh_index()) rebuilds this.
@@ -16,8 +24,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import hydrus_api  # type: ignore
@@ -26,13 +32,6 @@ from config import is_filtered_tag
 from tagrank.hydrus_client import get_file_infos_from_client
 
 logger = logging.getLogger(__name__)
-
-# Each candidate tag needs its own /search_files round trip (Hydrus's API has no "search N tags,
-# get results back per-tag" bulk endpoint) - run those concurrently rather than one at a time.
-# 8 matches the worker count Undertow's own tag_cleanup.py already uses against this same Hydrus
-# Client API, which is a reasonable amount of concurrency for a local SQLite-backed service
-# without saturating it.
-_INDEX_BUILD_WORKERS = 8
 
 
 @dataclass
@@ -86,42 +85,30 @@ def _build_index(client: hydrus_api.Client) -> TagIndex:
     from tagrank.pool import load_ratings  # local import: avoid a cycle (pool imports us)
 
     ratings = load_ratings()
-    candidate_tags = [
+    candidate_tags = {
         tag for tag in ratings
         if not tag.startswith("filename:") and not is_filtered_tag(tag)
-    ]
+    }
     logger.info(f"Building TagRank tag index for {len(candidate_tags)} rated tag(s)...")
 
-    def _search_one(tag: str) -> tuple[str, set[int]]:
-        try:
-            resp = client.search_files([tag], return_file_ids=True)
-            return tag, set(resp.get("file_ids") or [])
-        except Exception as e:  # noqa: BLE001 - one bad tag shouldn't abort the whole index
-            logger.error(f"Tag index: search for '{tag}' failed: {e}")
-            return tag, set()
+    # "system:everything" is the same whole-domain predicate pool.py's custom-search fallback
+    # uses - one search against the file domain this client is already scoped to, instead of
+    # one search per candidate tag.
+    all_ids_resp = client.search_files(["system:everything"], return_file_ids=True)
+    all_file_ids = list(all_ids_resp.get("file_ids") or [])
+    logger.info(f"Tag index: {len(all_file_ids)} file(s) in the library, fetching metadata...")
 
-    tag_to_file_ids: dict[str, set[int]] = {}
-    all_file_ids: set[int] = set()
-    done = 0
-    start = time.monotonic()
-    # Each of these is an independent, single-tag Hydrus search - previously run one at a time,
-    # which meant a rated-tag count in the low thousands took the better part of an hour (each
-    # /search_files round trip is small on its own, but they don't overlap when run serially).
-    # ThreadPoolExecutor.map here preserves candidate_tags order in what it yields even though
-    # the searches themselves complete out of order, so this reads the same as the old loop.
-    with ThreadPoolExecutor(max_workers=_INDEX_BUILD_WORKERS) as pool:
-        for tag, ids in pool.map(_search_one, candidate_tags):
-            tag_to_file_ids[tag] = ids
-            all_file_ids.update(ids)
-            done += 1
-            if done % 100 == 0 or done == len(candidate_tags):
-                elapsed = time.monotonic() - start
-                logger.info(f"Tag index: searched {done}/{len(candidate_tags)} tag(s) ({elapsed:.0f}s elapsed)...")
-
+    tag_to_file_ids: dict[str, set[int]] = {tag: set() for tag in candidate_tags}
     files: dict[int, FileRecord] = {}
     if all_file_ids:
-        for file_id, metadata in get_file_infos_from_client(client, list(all_file_ids)):
-            files[file_id] = _to_file_record(metadata)
+        for file_id, metadata in get_file_infos_from_client(client, all_file_ids):
+            record = _to_file_record(metadata)
+            files[file_id] = record
+            file_tags: set[str] = set()
+            for tags in record.tags_by_service.values():
+                file_tags.update(tags)
+            for tag in file_tags & candidate_tags:
+                tag_to_file_ids[tag].add(file_id)
 
     logger.info(f"Tag index built: {len(candidate_tags)} tag(s), {len(files)} distinct file(s).")
     return TagIndex(tag_to_file_ids=tag_to_file_ids, files=files)
