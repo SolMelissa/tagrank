@@ -40,6 +40,7 @@ from config import (
     get_list,
     key,
     is_excluded_tag,
+    is_filtered_tag,
 )
 from tagrank.errors import UnknownServiceKeyError
 from tagrank.tag_index import FileRecord, TagIndex
