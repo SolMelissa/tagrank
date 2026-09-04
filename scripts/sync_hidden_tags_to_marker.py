@@ -6,7 +6,7 @@ to the TagRank hidden-tags marker file in Hydrus, so the marker file always refl
 your current hidden-tags configuration.
 
 Usage:
-    python -m tagrank.sync_hidden_tags_to_marker
+    python scripts/sync_hidden_tags_to_marker.py
 
 The script will:
 1. Read hidden tags from config/TAG_FILTERS
@@ -17,8 +17,12 @@ The script will:
 
 import logging
 import sys
+from pathlib import Path
 
 import hydrus_api  # type: ignore
+
+# Add parent directory to path so we can import config and tagrank
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import get_tag_filters, key
 from tagrank.hydrus_client import create_client
