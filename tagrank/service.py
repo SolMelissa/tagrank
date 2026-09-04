@@ -211,6 +211,17 @@ def _badge_out(badge_id: str | None) -> dict[str, Any] | None:
     return {"id": badge.id, "name": badge.name, "icon": badge.icon, "difficulty": badge.difficulty}
 
 
+def _all_badges_out(entity_type: badges.EntityType, entity_id: str) -> list[dict[str, Any]]:
+    """Every badge an entity currently holds (not just the rarest one), highest difficulty
+    first then alphabetically by name - for UI surfaces that want to show/list them all
+    (image corner overlays, tag hover tooltips) rather than just a single rarity callout."""
+    held = badges.held_badge_ids(entity_type, entity_id)
+    out = [_badge_out(bid) for bid in held]
+    out = [b for b in out if b is not None]
+    out.sort(key=lambda b: (-badges.DIFFICULTY_ORDER.get(b["difficulty"], 0), b["name"]))
+    return out
+
+
 def get_rating_details(file_id: int, file_hash: str, tags: list[str], settings: Settings | None = None) -> dict[str, Any]:
     """One picture's TrueSkill score/rarest badge plus per-tag score/badge_count, for
     Undertow's embedded comparer (see plans/undertow-comparer-rating-details.md - the contract
@@ -228,6 +239,7 @@ def get_rating_details(file_id: int, file_hash: str, tags: list[str], settings: 
     photo_score: float | None = None
     photo_confidence: float | None = None
     picture_badge = _badge_out(badges.rarest_badge_id("picture", file_hash))
+    picture_badges = _all_badges_out("picture", file_hash)
 
     try:
         client = create_client(settings)
@@ -254,17 +266,31 @@ def get_rating_details(file_id: int, file_hash: str, tags: list[str], settings: 
     tags_out = []
     for tag in tags:
         rating = tag_ratings.get(tag)
+        tag_badges = _all_badges_out("tag", tag)
         tags_out.append({
             "tag": tag,
             "score": trueskill_number_from_rating(rating) if rating is not None else None,
             "confidence": trueskill_confidence_from_rating(rating) if rating is not None else None,
-            "badge_count": len(badges.held_badge_ids("tag", tag)),
+            "badge_count": len(tag_badges),
+            "badges": tag_badges,
         })
+
+    tag_scores = [t["score"] for t in tags_out if t["score"] is not None]
+    avg_tag_score = sum(tag_scores) / len(tag_scores) if tag_scores else None
+    if photo_score is not None and avg_tag_score is not None:
+        total_score = photo_score + avg_tag_score
+    elif photo_score is not None:
+        total_score = photo_score
+    else:
+        total_score = avg_tag_score
 
     return {
         "photo_score": photo_score,
         "photo_confidence": photo_confidence,
         "picture_badge": picture_badge,
+        "picture_badges": picture_badges,
+        "avg_tag_score": avg_tag_score,
+        "total_score": total_score,
         "tags": tags_out,
     }
 

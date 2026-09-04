@@ -126,12 +126,16 @@ class TagRatingOut(BaseModel):
     score: float | None
     confidence: float | None
     badge_count: int
+    badges: list[BadgeOut] = Field(default_factory=list)
 
 
 class RatingDetailsOut(BaseModel):
     photo_score: float | None
     photo_confidence: float | None
     picture_badge: BadgeOut | None
+    picture_badges: list[BadgeOut] = Field(default_factory=list)
+    avg_tag_score: float | None = None
+    total_score: float | None = None
     tags: list[TagRatingOut]
 
 

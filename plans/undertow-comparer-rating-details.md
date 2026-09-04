@@ -34,9 +34,18 @@ file's tags are without a fresh Hydrus round trip — Undertow already has them 
     "icon": "🛡️",
     "difficulty": "rare"
   },
+  "picture_badges": [
+    {"id": "iron_will", "name": "Iron Will", "icon": "🛡️", "difficulty": "rare"},
+    {"id": "first_blood", "name": "First Blood", "icon": "🩸", "difficulty": "common"}
+  ],
+  "avg_tag_score": 33.75,
+  "total_score": 76.45,
   "tags": [
-    {"tag": "character:foo", "score": 55.1, "confidence": 80.0, "badge_count": 2},
-    {"tag": "outdoors", "score": 12.4, "confidence": 30.0, "badge_count": 0}
+    {"tag": "character:foo", "score": 55.1, "confidence": 80.0, "badge_count": 2, "badges": [
+      {"id": "streak_5", "name": "On a Roll", "icon": "🔥", "difficulty": "common"},
+      {"id": "top_dog", "name": "Top Dog", "icon": "🐕", "difficulty": "epic"}
+    ]},
+    {"tag": "outdoors", "score": 12.4, "confidence": 30.0, "badge_count": 0, "badges": []}
   ]
 }
 ```
@@ -49,12 +58,24 @@ file's tags are without a fresh Hydrus round trip — Undertow already has them 
 - `picture_badge`: the result of `badges.rarest_badge_id("picture", hash)` (`badges.py:234`)
   resolved to its `BadgeDef` (`id`, `name`, `icon`, `difficulty`) — the single rarest badge this
   picture holds, same selection the native window's `_make_badge_pill_for` uses (`ui/window.py:394`).
-  `null` if the picture holds no badges.
+  `null` if the picture holds no badges. Kept for backward compat with the single-pill display.
+- `picture_badges`: **every** badge this picture currently holds (not just the rarest), each
+  resolved to its `BadgeDef` the same way as `picture_badge` — sorted highest-difficulty first,
+  then alphabetically by name. Empty list if the picture holds no badges. This is what Undertow's
+  image-corner overlay actually renders (one icon per held badge), since a single rarest-badge
+  pill under-represents a picture that's earned several.
+- `avg_tag_score`: the mean of every tag's `score` in the `tags` array below (skipping tags with
+  a `null` score, i.e. never-rated tags) — `null` if every tag on the file is unrated.
+- `total_score`: `photo_score + avg_tag_score` when both are available; falls back to whichever
+  one is non-null if only one is; `null` if both are null. The single "combined MMR" number
+  Undertow shows next to the comparer gauge.
 - `tags`: one entry per tag passed in the `tag` query params, in the same order given. `score`/
   `confidence` are that tag's own `trueskill_number_from_rating`/`trueskill_confidence_from_rating`
   off its tag rating (`null`/`null` if the tag has never been rated — same as an unrated picture).
-  `badge_count` is `len(badges.held_badge_ids("tag", tag))` (`badges.py:113`) — total badges held,
-  not just the rarest, since Undertow renders this as a `* * *` count rather than a single pill.
+  `badge_count` is `len(badges.held_badge_ids("tag", tag))` (`badges.py:113`) — total badges held.
+  `badges` is that same set of held badges resolved to full `BadgeDef`s (same sort order as
+  `picture_badges`) — what Undertow's tag-pill hover tooltip lists by name/icon instead of just
+  a bare count.
 
 ### Errors
 
