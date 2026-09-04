@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 
@@ -56,6 +57,15 @@ _OR_SEARCH_BATCH_SIZE = 256
 
 _FILE_CACHE_PATH = DATA_DIR / "tag_index_file_cache.json"
 _FILE_CACHE_VERSION = 1
+
+# The cache is saved after every this-many newly-fetched files, not just once at the end of a
+# build - a cold build on a large library can be many thousands of Hydrus round trips, and
+# without checkpointing, killing the process partway through (a crash, a forced daemon restart,
+# closing the TagRank tab mid-build) would lose everything fetched in that run, forcing the next
+# build to start over from whatever was cached before *this* run began. 5000 keeps checkpoint
+# writes infrequent enough to not dominate build time while bounding how much re-fetch work an
+# interruption can cost to a few checkpoints' worth.
+_CACHE_CHECKPOINT_SIZE = 5000
 
 
 @dataclass
@@ -135,15 +145,25 @@ def _build_index(client: hydrus_api.Client, *, force_refresh: bool = False) -> T
         f"({len(reused_ids)} reused from local cache, {len(new_ids)} new - fetching from Hydrus)..."
     )
 
+    # Persisting only the file_ids actually in `files`, not the raw union with whatever was
+    # loaded, means a file that dropped out of every rated tag (re-tagged, deleted) since the
+    # cache was last written drops out of the cache too, not lingers forever - true from this
+    # very first save (before any new fetching happens) since `reused_ids` already excludes
+    # anything no longer in `all_file_ids`.
     files: dict[int, FileRecord] = {file_id: cached_files[file_id] for file_id in reused_ids}
-    if new_ids:
-        for file_id, metadata in get_file_infos_from_client(client, list(new_ids)):
-            files[file_id] = _to_file_record(metadata)
-
-    # Persist only the file_ids actually in this build's result, not the raw union with whatever
-    # was loaded - a file that dropped out of every rated tag (re-tagged, deleted) since the
-    # cache was last written should drop out of the cache too, not linger forever.
-    _save_file_cache(files)
+    new_id_list = list(new_ids)
+    if new_id_list:
+        for start in range(0, len(new_id_list), _CACHE_CHECKPOINT_SIZE):
+            batch_ids = new_id_list[start:start + _CACHE_CHECKPOINT_SIZE]
+            for file_id, metadata in get_file_infos_from_client(client, batch_ids):
+                files[file_id] = _to_file_record(metadata)
+            # Checkpoint: everything fetched up to here survives an interruption from this
+            # point on, even if the build never reaches the end of new_id_list.
+            _save_file_cache(files)
+            done = min(start + _CACHE_CHECKPOINT_SIZE, len(new_id_list))
+            logger.info(f"Tag index: fetched and cached {done}/{len(new_id_list)} new file(s)...")
+    else:
+        _save_file_cache(files)
 
     tag_to_file_ids: dict[str, set[int]] = {tag: set() for tag in candidate_tags}
     for file_id, record in files.items():
@@ -181,15 +201,24 @@ def _load_file_cache() -> dict[int, FileRecord]:
 
 def _save_file_cache(files: dict[int, FileRecord]) -> None:
     """Best-effort save - a failure here (disk full, permissions) shouldn't take down an
-    otherwise-successful index build, just means next startup pays the fetch cost again."""
+    otherwise-successful index build, just means next startup pays the fetch cost again.
+
+    Writes to a temp file and atomically renames it over the real cache path (os.replace is
+    atomic on both POSIX and Windows) rather than writing the real path directly. A build now
+    checkpoints this on every batch of newly-fetched files (see _CACHE_CHECKPOINT_SIZE), so a
+    plain truncate-then-write here would mean a kill during any one of those many writes could
+    corrupt the cache and lose everything from every previous successful run too, not just this
+    one's progress - the exact failure mode checkpointing exists to avoid."""
     data = {
         "version": _FILE_CACHE_VERSION,
         "files": {str(file_id): _file_record_to_json(record) for file_id, record in files.items()},
     }
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_FILE_CACHE_PATH, "w", encoding="utf-8") as f:
+        tmp_path = _FILE_CACHE_PATH.with_suffix(_FILE_CACHE_PATH.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f)
+        os.replace(tmp_path, _FILE_CACHE_PATH)
     except OSError as e:
         logger.error(f"Tag index: couldn't save file cache: {e}")
 
