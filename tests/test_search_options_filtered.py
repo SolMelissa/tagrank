@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -16,14 +18,35 @@ class FakeFilterClient:
     def __init__(self, files_by_tag: dict[str, list[int]], metadata_by_id: dict[int, dict] | None = None):
         self.files_by_tag = files_by_tag
         self.metadata_by_id = metadata_by_id or {}
+        # tag_index builds tag -> file_ids by inverting each file's metadata tags, not straight
+        # from the search result, so metadata returned below must actually carry whichever
+        # tag(s) `files_by_tag` says a file has - precompute the reverse mapping once so every
+        # file gets a metadata entry with correct tags, overriding any placeholder "tags" value
+        # (usually `{}`) individual tests set for unrelated fields like width/height/is_inbox.
+        self._tags_for_file: dict[int, list[str]] = {}
+        for tag, file_ids in files_by_tag.items():
+            for fid in file_ids:
+                self._tags_for_file.setdefault(fid, []).append(tag)
 
     def search_files(self, tags, return_file_ids=None, return_hashes=None, **kwargs):
-        # first element of `tags` is always the tag predicate in these tests
-        tag = tags[0]
-        return {"file_ids": list(self.files_by_tag.get(tag, []))}
+        # first element of `tags` is always the tag predicate in these tests - a plain string
+        # for a single-tag search, or a nested list for tag_index's OR-batched search (an
+        # un-prefixed nested list is Hydrus's OR-group syntax - see tag_index.py's docstring).
+        predicate = tags[0]
+        if isinstance(predicate, (list, tuple)):
+            ids: set[int] = set()
+            for tag in predicate:
+                ids.update(self.files_by_tag.get(tag, []))
+            return {"file_ids": sorted(ids)}
+        return {"file_ids": list(self.files_by_tag.get(predicate, []))}
 
     def get_file_metadata(self, file_ids):
-        return {"metadata": [self.metadata_by_id[fid] for fid in file_ids if fid in self.metadata_by_id]}
+        metadata = []
+        for fid in file_ids:
+            meta = dict(self.metadata_by_id.get(fid, {"file_id": fid}))
+            meta["tags"] = {"known-tag-service": {"display_tags": {"0": self._tags_for_file.get(fid, [])}}}
+            metadata.append(meta)
+        return {"metadata": metadata}
 
     def get_services(self):
         return {"services": {"known-file-service": {"type": 0}, "known-tag-service": {"type": 5}}}
@@ -40,6 +63,15 @@ class BuildFilteredSearchOptionsTests(unittest.TestCase):
         # tests using different FakeFilterClient data would silently share whichever one
         # happened to build the index first unless it's reset here.
         tag_index._index = None
+
+        # tag_index also persists an on-disk file cache between runs, keyed by a fixed path
+        # under the real DATA_DIR - point it at a throwaway temp file for the duration of each
+        # test so tests never read stale real user data, and never write fake test data into it.
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        patcher = patch.object(tag_index, "_FILE_CACHE_PATH", Path(tmpdir.name) / "tag_index_file_cache.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_happy_path_ranks_and_counts_filtered_files(self):
         ratings = {"character:mario": (30.0, 1.0), "character:luigi": (10.0, 1.0)}

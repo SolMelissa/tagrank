@@ -20,22 +20,32 @@ Hydrus's search API accepts a nested (un-prefixed) list within the top-level tag
 group - see developer_api.html's "OR predicates" section: `["skirt", ["samus aran", "lara
 croft"]]` means `skirt AND (samus aran OR lara croft)`. Batching a few hundred rated tags per OR
 group keeps each request's predicate list and result set bounded, turns ~1760 tags into single-
-digit search round trips, and returns only the files that could possibly need indexing.
+digit search round trips. On a library where most files carry at least one rated tag (a broad
+rated tag like a performer name can cover a huge fraction of a large collection), that OR search
+still resolves to nearly every file, so it alone doesn't bound the metadata-fetch cost - see the
+on-disk file cache below for what actually does.
 
-Rating a file doesn't change which files have which tags, so nothing here needs to be
-invalidated when a comparison is judged - only a fresh server start (or explicit
-refresh_index()) rebuilds this.
+Per-file metadata (FileRecord) is cached to disk between runs, keyed by file_id, so a later
+build only needs to fetch metadata for files not already known - typically just whatever's been
+imported since the last run - rather than paying the full per-file Hydrus round trip cost every
+single startup. This trades a small amount of staleness for that speed: if an already-cached
+file gets re-tagged in Hydrus without any new file being added, that file's cached tags won't
+reflect the change until refresh_index() is called explicitly (which always bypasses the cache
+and re-fetches everything) or the cache file is deleted. Rating a file in TagRank doesn't change
+which files have which tags, so nothing here needs invalidating just because a comparison was
+judged.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import dataclass, field
 
 import hydrus_api  # type: ignore
 
-from config import is_filtered_tag
+from config import DATA_DIR, is_filtered_tag
 from tagrank.hydrus_client import get_file_infos_from_client
 
 logger = logging.getLogger(__name__)
@@ -43,6 +53,9 @@ logger = logging.getLogger(__name__)
 # How many rated tags go into one OR-group search. Kept well under any practical URL/JSON size
 # concern while still turning ~1760 tags into single-digit round trips instead of one per tag.
 _OR_SEARCH_BATCH_SIZE = 256
+
+_FILE_CACHE_PATH = DATA_DIR / "tag_index_file_cache.json"
+_FILE_CACHE_VERSION = 1
 
 
 @dataclass
@@ -84,15 +97,16 @@ def ensure_index(client: hydrus_api.Client) -> TagIndex:
 
 
 def refresh_index(client: hydrus_api.Client) -> TagIndex:
-    """Forces a full rebuild - e.g. after new tags get rated, or files get added/removed in
-    Hydrus, and the cache needs to catch up. Not called automatically."""
+    """Forces a full rebuild that bypasses the on-disk file cache entirely - e.g. after
+    re-tagging files in Hydrus in a way that would leave cached FileRecords stale. Not called
+    automatically. A plain server restart does NOT do this - see ensure_index/_build_index."""
     global _index
     with _lock:
-        _index = _build_index(client)
+        _index = _build_index(client, force_refresh=True)
     return _index
 
 
-def _build_index(client: hydrus_api.Client) -> TagIndex:
+def _build_index(client: hydrus_api.Client, *, force_refresh: bool = False) -> TagIndex:
     from tagrank.pool import load_ratings  # local import: avoid a cycle (pool imports us)
 
     ratings = load_ratings()
@@ -112,22 +126,94 @@ def _build_index(client: hydrus_api.Client) -> TagIndex:
         all_file_ids.update(resp.get("file_ids") or [])
         done = min(start + _OR_SEARCH_BATCH_SIZE, len(ordered_tags))
         logger.info(f"Tag index: searched {done}/{len(ordered_tags)} tag(s), {len(all_file_ids)} file(s) found so far...")
-    logger.info(f"Tag index: {len(all_file_ids)} file(s) carry a rated tag, fetching metadata...")
+
+    cached_files = {} if force_refresh else _load_file_cache()
+    reused_ids = all_file_ids & cached_files.keys()
+    new_ids = all_file_ids - cached_files.keys()
+    logger.info(
+        f"Tag index: {len(all_file_ids)} file(s) carry a rated tag "
+        f"({len(reused_ids)} reused from local cache, {len(new_ids)} new - fetching from Hydrus)..."
+    )
+
+    files: dict[int, FileRecord] = {file_id: cached_files[file_id] for file_id in reused_ids}
+    if new_ids:
+        for file_id, metadata in get_file_infos_from_client(client, list(new_ids)):
+            files[file_id] = _to_file_record(metadata)
+
+    # Persist only the file_ids actually in this build's result, not the raw union with whatever
+    # was loaded - a file that dropped out of every rated tag (re-tagged, deleted) since the
+    # cache was last written should drop out of the cache too, not linger forever.
+    _save_file_cache(files)
 
     tag_to_file_ids: dict[str, set[int]] = {tag: set() for tag in candidate_tags}
-    files: dict[int, FileRecord] = {}
-    if all_file_ids:
-        for file_id, metadata in get_file_infos_from_client(client, list(all_file_ids)):
-            record = _to_file_record(metadata)
-            files[file_id] = record
-            file_tags: set[str] = set()
-            for tags in record.tags_by_service.values():
-                file_tags.update(tags)
-            for tag in file_tags & candidate_tags:
-                tag_to_file_ids[tag].add(file_id)
+    for file_id, record in files.items():
+        file_tags: set[str] = set()
+        for tags in record.tags_by_service.values():
+            file_tags.update(tags)
+        for tag in file_tags & candidate_tags:
+            tag_to_file_ids[tag].add(file_id)
 
     logger.info(f"Tag index built: {len(candidate_tags)} tag(s), {len(files)} distinct file(s).")
     return TagIndex(tag_to_file_ids=tag_to_file_ids, files=files)
+
+
+def _load_file_cache() -> dict[int, FileRecord]:
+    """Best-effort load of the on-disk file cache - any problem (missing file, corrupt JSON, a
+    schema version bump) just means starting cold and re-fetching everything from Hydrus, same
+    as if caching didn't exist."""
+    try:
+        with open(_FILE_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        logger.info(f"Tag index: no usable file cache ({e}) - building cold.")
+        return {}
+    if data.get("version") != _FILE_CACHE_VERSION:
+        logger.info("Tag index: file cache is from an older schema version - building cold.")
+        return {}
+    cached: dict[int, FileRecord] = {}
+    for file_id_str, record_data in (data.get("files") or {}).items():
+        try:
+            cached[int(file_id_str)] = _file_record_from_json(record_data)
+        except (ValueError, TypeError, KeyError):
+            continue
+    return cached
+
+
+def _save_file_cache(files: dict[int, FileRecord]) -> None:
+    """Best-effort save - a failure here (disk full, permissions) shouldn't take down an
+    otherwise-successful index build, just means next startup pays the fetch cost again."""
+    data = {
+        "version": _FILE_CACHE_VERSION,
+        "files": {str(file_id): _file_record_to_json(record) for file_id, record in files.items()},
+    }
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_FILE_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError as e:
+        logger.error(f"Tag index: couldn't save file cache: {e}")
+
+
+def _file_record_to_json(record: FileRecord) -> dict:
+    return {
+        "width": record.width,
+        "height": record.height,
+        "is_inbox": record.is_inbox,
+        "tags_by_service": {key: sorted(tags) for key, tags in record.tags_by_service.items()},
+        "import_times": record.import_times,
+        "file_service_keys": sorted(record.file_service_keys),
+    }
+
+
+def _file_record_from_json(data: dict) -> FileRecord:
+    return FileRecord(
+        width=int(data.get("width") or 0),
+        height=int(data.get("height") or 0),
+        is_inbox=bool(data.get("is_inbox")),
+        tags_by_service={key: set(tags) for key, tags in (data.get("tags_by_service") or {}).items()},
+        import_times=dict(data.get("import_times") or {}),
+        file_service_keys=set(data.get("file_service_keys") or []),
+    )
 
 
 def _to_file_record(metadata: dict) -> FileRecord:
