@@ -12,7 +12,7 @@ from typing import Any
 import hydrus_api  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 
-from config import DATA_DIR, is_excluded_tag
+from config import DATA_DIR, is_excluded_tag, is_filtered_tag
 from tagrank import badges
 from tagrank.settings import Settings, load_settings
 from tagrank.tag_utils import resolve_tags
