@@ -13,7 +13,7 @@ import hydrus_api  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 
 from config import DATA_DIR, is_excluded_tag, is_filtered_tag
-from tagrank import badges
+from tagrank import badges, write_queue
 from tagrank.settings import Settings, load_settings
 from tagrank.tag_utils import resolve_tags
 
@@ -456,10 +456,14 @@ class RatingSystem:
         self.go_back_file_ratings_stack.append(go_back_file_ratings)
         ts = time.time()
         self.known_comparison_choices.append((winner["file_id"], loser["file_id"], ts))
-        self.write_file_mmr_rating(winner)
-        self.write_file_mmr_rating(loser)
-        self.write_file_mmr_confidence_rating(winner)
-        self.write_file_mmr_confidence_rating(loser)
+        # Queued, not called directly: these are Hydrus HTTP writes with nothing downstream
+        # reading their result synchronously (self.file_ratings above is already updated in-
+        # memory, which is all next-pair selection needs) - blocking the caller on 4 sequential
+        # Hydrus round trips here only delays showing the next pair for no correctness benefit.
+        write_queue.enqueue(lambda: self.write_file_mmr_rating(winner))
+        write_queue.enqueue(lambda: self.write_file_mmr_rating(loser))
+        write_queue.enqueue(lambda: self.write_file_mmr_confidence_rating(winner))
+        write_queue.enqueue(lambda: self.write_file_mmr_confidence_rating(loser))
 
         # ---- Badges + Underdog Alerts (entity-scoped: each call only ever reads/writes
         # the stats of the one entity it names - see tagrank/badges.py's scoping rule). ----

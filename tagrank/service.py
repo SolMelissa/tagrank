@@ -24,7 +24,7 @@ import hydrus_api  # type: ignore
 import matplotlib
 matplotlib.use("Agg")
 
-from tagrank import badges, graphs, pool, presets, tournament as tournament_module
+from tagrank import badges, graphs, pool, presets, write_queue, tournament as tournament_module
 from tagrank.errors import FileInformationError, NoRelevantFilesError, TagRankError
 from tagrank.hydrus_client import create_client
 from tagrank.rating import (
@@ -157,8 +157,10 @@ def submit_result(session: Session, choice: str) -> None:
 
     session.rating_system.write_prediction_log_entry(left, right, label)
     session.rating_system.process_result(winner=winner, loser=loser)
-    pool.write_choice(winner["hash"], liked=True, client=session.client)
-    pool.write_choice(loser["hash"], liked=False, client=session.client)
+    # Queued, not called directly - see write_queue.py. The like/dislike Hydrus write has no
+    # bearing on session.left/right below or on which pair get_next_pair() hands out next.
+    write_queue.enqueue(lambda: pool.write_choice(winner["hash"], liked=True, client=session.client))
+    write_queue.enqueue(lambda: pool.write_choice(loser["hash"], liked=False, client=session.client))
     session.left, session.right = None, None
 
 
