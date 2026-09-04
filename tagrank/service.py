@@ -27,7 +27,13 @@ matplotlib.use("Agg")
 from tagrank import badges, graphs, pool, presets, tournament as tournament_module
 from tagrank.errors import FileInformationError, NoRelevantFilesError, TagRankError
 from tagrank.hydrus_client import create_client
-from tagrank.rating import FileMetaData, RatingSystem
+from tagrank.rating import (
+    FileMetaData,
+    RatingSystem,
+    load_current_tag_ratings,
+    trueskill_confidence_from_rating,
+    trueskill_number_from_rating,
+)
 from tagrank.settings import Settings, get_settings_store, load_settings
 
 
@@ -194,6 +200,73 @@ def get_presets() -> list[presets.Preset]:
 def get_badges() -> dict[str, dict[str, list[dict]]]:
     """All earned badges, keyed by entity type then tag/file-hash. See tagrank/badges.py."""
     return badges.load_badges()
+
+
+def _badge_out(badge_id: str | None) -> dict[str, Any] | None:
+    if badge_id is None:
+        return None
+    badge = badges.BADGE_BY_ID.get(badge_id)
+    if badge is None:
+        return None
+    return {"id": badge.id, "name": badge.name, "icon": badge.icon, "difficulty": badge.difficulty}
+
+
+def get_rating_details(file_id: int, file_hash: str, tags: list[str], settings: Settings | None = None) -> dict[str, Any]:
+    """One picture's TrueSkill score/rarest badge plus per-tag score/badge_count, for
+    Undertow's embedded comparer (see plans/undertow-comparer-rating-details.md - the contract
+    this implements). Picture ratings only live in Hydrus (as two plain numeric rating-service
+    values TagRank itself writes post-comparison - see RatingSystem.write_file_mmr_rating/
+    write_file_mmr_confidence_rating), so unlike tag scores there's no local on-disk store to
+    read them back from; a fresh Hydrus metadata fetch by hash is unavoidable here. Reading
+    those two numbers straight off the fetched metadata (rather than round-tripping them through
+    a freshly-bootstrapped Rating(), which RatingSystem.file_rating_for_file always seeds with
+    the *default* sigma and would make photo_confidence come back as 0% for every file that
+    hasn't already been re-compared in *this* process's lifetime) is what actually reproduces
+    the number the user last saw written, not a degenerate reconstruction of it.
+    """
+    settings = settings or load_settings()
+    photo_score: float | None = None
+    photo_confidence: float | None = None
+    picture_badge = _badge_out(badges.rarest_badge_id("picture", file_hash))
+
+    try:
+        client = create_client(settings)
+        metadata_response = client.get_file_metadata(hashes=[file_hash])
+        entries = (metadata_response or {}).get("metadata") or []
+        ratings = (entries[0].get("ratings") or {}) if entries else {}
+    except Exception:
+        ratings = {}
+
+    mmr_key = settings.hydrus.mmr_service_key
+    confidence_key = settings.hydrus.mmr_confidence_service_key
+    if mmr_key and mmr_key in ratings:
+        try:
+            photo_score = float(ratings[mmr_key])
+        except (TypeError, ValueError):
+            photo_score = None
+    if confidence_key and confidence_key in ratings:
+        try:
+            photo_confidence = float(ratings[confidence_key])
+        except (TypeError, ValueError):
+            photo_confidence = None
+
+    tag_ratings = load_current_tag_ratings()
+    tags_out = []
+    for tag in tags:
+        rating = tag_ratings.get(tag)
+        tags_out.append({
+            "tag": tag,
+            "score": trueskill_number_from_rating(rating) if rating is not None else None,
+            "confidence": trueskill_confidence_from_rating(rating) if rating is not None else None,
+            "badge_count": len(badges.held_badge_ids("tag", tag)),
+        })
+
+    return {
+        "photo_score": photo_score,
+        "photo_confidence": photo_confidence,
+        "picture_badge": picture_badge,
+        "tags": tags_out,
+    }
 
 
 def start_tournament(session: Session) -> tournament_module.Tournament:

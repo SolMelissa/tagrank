@@ -66,22 +66,30 @@ def rating_from_trueskill_score(score: float) -> Rating:
     return Rating(score + (3 * default_sigma), default_sigma)
 
 
+def load_current_tag_ratings() -> dict[str, Rating]:
+    """Every persisted tag rating (data/ratings.json), keyed by tag - the same global store
+    every RatingSystem loads at construction. Standalone so a caller that only wants tag
+    scores (e.g. the rating-details API route) doesn't need a Hydrus client or file pool to
+    build a whole RatingSystem just to read this file."""
+    ratings: dict[str, Rating] = {}
+    ratings_path = DATA_DIR / "ratings.json"
+    if ratings_path.exists():
+        with open(ratings_path) as f:
+            tag_to_ratings = json.loads(f.read())
+            for tag, rating_params in tag_to_ratings:
+                if not tag.startswith("filename:") and not is_filtered_tag(tag):
+                    ratings[tag] = Rating(rating_params[0], rating_params[1])
+    return ratings
+
+
 class RatingSystem:
     def __init__(self, client: hydrus_api.Client, file_ids: list[int], settings: Settings | None = None):
         self.settings = settings or load_settings()
         self.client = client
         self.file_ids = file_ids
         self.used_file_pairs: set[tuple[int, int]] = set()
-        self.current_ratings: dict[str, Rating] = {}
+        self.current_ratings: dict[str, Rating] = load_current_tag_ratings()
         self.file_ratings: dict[int, Rating] = {}
-
-        ratings_path = DATA_DIR / "ratings.json"
-        if ratings_path.exists():
-            with open(ratings_path) as f:
-                tag_to_ratings = json.loads(f.read())
-                for tag, rating_params in tag_to_ratings:
-                    if not tag.startswith("filename:") and not is_filtered_tag(tag):
-                        self.current_ratings[tag] = Rating(rating_params[0], rating_params[1])
 
         self.go_back_ratings_stack: list[dict[str, Rating]] = []
         self.go_back_file_ratings_stack: list[dict[int, Rating]] = []

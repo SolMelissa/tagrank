@@ -17,7 +17,7 @@ import uuid
 from dataclasses import asdict
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -109,6 +109,27 @@ class PresetOut(BaseModel):
 class BadgeEntry(BaseModel):
     badge_id: str
     earned_at: float
+
+
+class BadgeOut(BaseModel):
+    id: str
+    name: str
+    icon: str
+    difficulty: Literal["common", "rare", "epic", "legendary"]
+
+
+class TagRatingOut(BaseModel):
+    tag: str
+    score: float | None
+    confidence: float | None
+    badge_count: int
+
+
+class RatingDetailsOut(BaseModel):
+    photo_score: float | None
+    photo_confidence: float | None
+    picture_badge: BadgeOut | None
+    tags: list[TagRatingOut]
 
 
 class TournamentStatus(BaseModel):
@@ -500,6 +521,24 @@ def list_badges() -> dict[str, dict[str, list[BadgeEntry]]]:
         entity_key: {entity_id: [BadgeEntry(**e) for e in entries] for entity_id, entries in bucket.items()}
         for entity_key, bucket in raw.items()
     }
+
+
+@app.get(
+    "/files/{file_id}/rating-details",
+    response_model=RatingDetailsOut,
+    summary="A picture's TrueSkill score/badge plus per-tag score/badge counts",
+    description="See plans/undertow-comparer-rating-details.md for the full contract this "
+                "implements - built for Undertow's embedded comparer, which otherwise has no "
+                "way to reach TagRank's rating/badge data (only file_id/hash cross the "
+                "/sessions/* API). An unrated/unknown hash is not an error: photo_score, "
+                "photo_confidence and picture_badge just come back null, same as any file "
+                "that's never been compared.",
+)
+def rating_details(file_id: int, hash: str, tag: list[str] = Query(default=[])) -> RatingDetailsOut:
+    if not hash:
+        raise HTTPException(status_code=400, detail={"error": "MissingHashError", "message": "hash is required"})
+    details = service.get_rating_details(file_id, hash, tag)
+    return RatingDetailsOut(**details)
 
 
 # --------------------------------------------------------------------------------------
