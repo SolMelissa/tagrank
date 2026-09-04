@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import hydrus_api  # type: ignore
@@ -24,6 +26,13 @@ from config import is_filtered_tag
 from tagrank.hydrus_client import get_file_infos_from_client
 
 logger = logging.getLogger(__name__)
+
+# Each candidate tag needs its own /search_files round trip (Hydrus's API has no "search N tags,
+# get results back per-tag" bulk endpoint) - run those concurrently rather than one at a time.
+# 8 matches the worker count Undertow's own tag_cleanup.py already uses against this same Hydrus
+# Client API, which is a reasonable amount of concurrency for a local SQLite-backed service
+# without saturating it.
+_INDEX_BUILD_WORKERS = 8
 
 
 @dataclass
@@ -83,17 +92,31 @@ def _build_index(client: hydrus_api.Client) -> TagIndex:
     ]
     logger.info(f"Building TagRank tag index for {len(candidate_tags)} rated tag(s)...")
 
-    tag_to_file_ids: dict[str, set[int]] = {}
-    all_file_ids: set[int] = set()
-    for tag in candidate_tags:
+    def _search_one(tag: str) -> tuple[str, set[int]]:
         try:
             resp = client.search_files([tag], return_file_ids=True)
-            ids = set(resp.get("file_ids") or [])
+            return tag, set(resp.get("file_ids") or [])
         except Exception as e:  # noqa: BLE001 - one bad tag shouldn't abort the whole index
             logger.error(f"Tag index: search for '{tag}' failed: {e}")
-            ids = set()
-        tag_to_file_ids[tag] = ids
-        all_file_ids.update(ids)
+            return tag, set()
+
+    tag_to_file_ids: dict[str, set[int]] = {}
+    all_file_ids: set[int] = set()
+    done = 0
+    start = time.monotonic()
+    # Each of these is an independent, single-tag Hydrus search - previously run one at a time,
+    # which meant a rated-tag count in the low thousands took the better part of an hour (each
+    # /search_files round trip is small on its own, but they don't overlap when run serially).
+    # ThreadPoolExecutor.map here preserves candidate_tags order in what it yields even though
+    # the searches themselves complete out of order, so this reads the same as the old loop.
+    with ThreadPoolExecutor(max_workers=_INDEX_BUILD_WORKERS) as pool:
+        for tag, ids in pool.map(_search_one, candidate_tags):
+            tag_to_file_ids[tag] = ids
+            all_file_ids.update(ids)
+            done += 1
+            if done % 100 == 0 or done == len(candidate_tags):
+                elapsed = time.monotonic() - start
+                logger.info(f"Tag index: searched {done}/{len(candidate_tags)} tag(s) ({elapsed:.0f}s elapsed)...")
 
     files: dict[int, FileRecord] = {}
     if all_file_ids:
