@@ -46,8 +46,9 @@ from dataclasses import dataclass, field
 
 import hydrus_api  # type: ignore
 
-from config import DATA_DIR, is_filtered_tag
+from config import DATA_DIR, is_excluded_tag, get
 from tagrank.hydrus_client import get_file_infos_from_client
+from tagrank.tag_utils import has_namespace, resolve_tags
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +118,24 @@ def refresh_index(client: hydrus_api.Client) -> TagIndex:
 
 
 def _build_index(client: hydrus_api.Client, *, force_refresh: bool = False) -> TagIndex:
+    from tagrank import hidden_tags  # local import: avoid a cycle
     from tagrank.pool import load_ratings  # local import: avoid a cycle (pool imports us)
+
+    # Refresh hidden tags on each build so changes in Hydrus are picked up
+    hidden_tags.refresh_hidden_tags(client)
 
     ratings = load_ratings()
     candidate_tags = {
         tag for tag in ratings
-        if not tag.startswith("filename:") and not is_filtered_tag(tag)
+        if not tag.startswith("filename:") and not is_excluded_tag(tag)
     }
+
+    # Apply namespace filter if configured
+    tag_universe = get("TAG_UNIVERSE", "all").strip().lower()
+    if tag_universe == "namespaced_only":
+        candidate_tags = {tag for tag in candidate_tags if has_namespace(tag)}
+        logger.info(f"TAG_UNIVERSE=namespaced_only: filtered to {len(candidate_tags)} namespaced tag(s)")
+
     logger.info(f"Building TagRank tag index for {len(candidate_tags)} rated tag(s)...")
 
     ordered_tags = list(candidate_tags)
@@ -248,7 +260,10 @@ def _file_record_from_json(data: dict) -> FileRecord:
 def _to_file_record(metadata: dict) -> FileRecord:
     tags_by_service: dict[str, set[str]] = {}
     for service_key, service_data in (metadata.get("tags") or {}).items():
-        tags_by_service[service_key] = set((service_data.get("display_tags") or {}).get("0", []))
+        # Use resolve_tags to get final tag set (respects siblings + namespaced carve-out)
+        resolved = resolve_tags(service_data)
+        # Filter out excluded tags (TAG_FILTERS + hidden-tags marker)
+        tags_by_service[service_key] = {tag for tag in resolved if not is_excluded_tag(tag)}
 
     file_services = (metadata.get("file_services") or {}).get("current", {}) or {}
     import_times = {key: (data.get("time_imported") or 0) for key, data in file_services.items()}

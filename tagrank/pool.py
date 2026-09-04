@@ -39,10 +39,11 @@ from config import (
     get_float_or_none,
     get_list,
     key,
-    is_filtered_tag,
+    is_excluded_tag,
 )
 from tagrank.errors import UnknownServiceKeyError
 from tagrank.tag_index import FileRecord, TagIndex
+from tagrank.tag_utils import has_namespace
 
 # --- pull settings out of config/KEYS and config/SETTINGS ---
 API_URL            = key("API_URL", "http://127.0.0.1:45869/")
@@ -82,7 +83,9 @@ def _get_default_client() -> hydrus_api.Client:
 # ------------------------- rating-based search selection -------------------------
 
 def load_ratings() -> dict[str, tuple[float, float]]:
-    """Load {tag: (mu, sigma)} from ratings.json (TrueSkill params)."""
+    """Load {tag: (mu, sigma)} from ratings.json (TrueSkill params) and reconcile with
+    Hydrus's current sibling map (migrate ratings keyed by a tag's old non-ideal name
+    to its current ideal tag, per the sibling handling carve-out)."""
     try:
         with open(DATA_DIR / "ratings.json", "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -94,10 +97,48 @@ def load_ratings() -> dict[str, tuple[float, float]]:
         try:
             tag, (mu, sigma) = entry
             tag_str = str(tag)
-            if not is_filtered_tag(tag_str):
+            if not is_excluded_tag(tag_str):
                 ratings[tag_str] = (float(mu), float(sigma))
         except (ValueError, TypeError):
             continue
+
+    # One-time reconciliation: migrate ratings from sibling-collapsed non-ideal tags to their
+    # current ideal tags. Unnamespaced tags only — namespaced tags survive as-is per the rule.
+    try:
+        client = _get_default_client()
+        unnamespaced_tags = [tag for tag in ratings.keys() if not has_namespace(tag)]
+        if unnamespaced_tags:
+            siblings_response = client.get_siblings_and_parents(unnamespaced_tags)
+            ideal_map = siblings_response.get("ideal_tags", {}) if siblings_response else {}
+            to_merge: dict[str, list[tuple[str, tuple[float, float]]]] = {}  # ideal -> [(old_tag, rating), ...]
+
+            for tag, ideal_tag in ideal_map.items():
+                if tag != ideal_tag and tag in ratings:
+                    # Tag's ideal has changed - this rating should migrate to the ideal
+                    old_rating = ratings.pop(tag)
+                    if ideal_tag not in to_merge:
+                        to_merge[ideal_tag] = []
+                    to_merge[ideal_tag].append((tag, old_rating))
+
+            for ideal_tag, old_ratings_list in to_merge.items():
+                # Pick the highest-confidence (lowest sigma) old rating to merge
+                best_old_tag, best_old_rating = min(old_ratings_list, key=lambda x: x[1][1])
+
+                if ideal_tag in ratings:
+                    # Ideal tag already has a rating — keep the higher-confidence one
+                    old_mu, old_sigma = best_old_rating
+                    current_mu, current_sigma = ratings[ideal_tag]
+                    if old_sigma < current_sigma:
+                        ratings[ideal_tag] = best_old_rating
+                        logger.info(f"Merged {best_old_tag} into {ideal_tag}, favoring migrated (sigma={old_sigma:.2f})")
+                    else:
+                        logger.info(f"Merged {best_old_tag} into {ideal_tag}, keeping existing (higher confidence)")
+                else:
+                    ratings[ideal_tag] = best_old_rating
+                    logger.info(f"Migrated {best_old_tag} → {ideal_tag} (sibling reconciliation)")
+    except Exception as e:
+        logger.warning(f"Sibling reconciliation failed (ratings still usable): {e}")
+
     return ratings
 
 
@@ -318,10 +359,10 @@ def _file_record_passes_filters(tag: str, record: FileRecord | None, filters: Fi
     if filters.file_service_keys and not (record.file_service_keys & set(filters.file_service_keys)):
         return False
 
-    has_namespace = ":" in tag and bool(tag.split(":", 1)[0])
-    if filters.namespace_mode == "namespaced" and not has_namespace:
+    tag_has_namespace = has_namespace(tag)
+    if filters.namespace_mode == "namespaced" and not tag_has_namespace:
         return False
-    if filters.namespace_mode == "unnamespaced" and has_namespace:
+    if filters.namespace_mode == "unnamespaced" and tag_has_namespace:
         return False
 
     if filters.archive_mode == "archived" and record.is_inbox:

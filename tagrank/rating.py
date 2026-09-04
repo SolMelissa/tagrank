@@ -12,9 +12,10 @@ from typing import Any
 import hydrus_api  # type: ignore
 from trueskill import Rating, rate  # type: ignore
 
-from config import DATA_DIR, is_filtered_tag
+from config import DATA_DIR, is_excluded_tag
 from tagrank import badges
 from tagrank.settings import Settings, load_settings
+from tagrank.tag_utils import resolve_tags
 
 FileMetaData = dict[str, Any]
 
@@ -25,13 +26,10 @@ def tags_from_file(file: FileMetaData) -> list[str]:
     tag_repos: dict[str, dict[str, Any]] = file["tags"]
     tags: set[str] = set()
     for repo in tag_repos.values():
-        if repo["display_tags"] is not None:
-            if str(hydrus_api.TagStatus.CURRENT.value) in repo["display_tags"]:
-                tags.update(tag for tag in repo["display_tags"][str(hydrus_api.TagStatus.CURRENT)]
-                            if not tag.startswith("filename:") and not is_filtered_tag(tag))
-            if str(hydrus_api.TagStatus.PENDING.value) in repo["display_tags"]:
-                tags.update(tag for tag in repo["display_tags"][str(hydrus_api.TagStatus.PENDING)]
-                            if not tag.startswith("filename:") and not is_filtered_tag(tag))
+        # Use resolve_tags to get final tag set (respects siblings + namespaced carve-out)
+        resolved = resolve_tags(repo)
+        # Filter out filename: tags and excluded tags (TAG_FILTERS + hidden-tags marker)
+        tags.update(tag for tag in resolved if not tag.startswith("filename:") and not is_excluded_tag(tag))
     return list(tags)
 
 

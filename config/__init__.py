@@ -168,6 +168,23 @@ def is_filtered_tag(tag: str) -> bool:
     return False
 
 
+def is_excluded_tag(tag: str) -> bool:
+    """True if tag should be excluded from TagRank (either via TAG_FILTERS or hidden-tags marker).
+
+    Combines is_filtered_tag() (config/TAG_FILTERS prefix/exact matching) and the hidden-tag
+    marker file (read via hidden_tags.is_hidden_tag). Prefers importing here to avoid
+    circular dependencies with tagrank modules.
+    """
+    if is_filtered_tag(tag):
+        return True
+    try:
+        from tagrank import hidden_tags  # local import: avoid cycles
+        return hidden_tags.is_hidden_tag(tag)
+    except ImportError:
+        # tagrank.hidden_tags not available yet (shouldn't happen in normal flow)
+        return False
+
+
 def ensure_config_files() -> None:
     """Create config/ plus KEYS and SETTINGS (with sane defaults) if missing.
     Never overwrites existing files, so real keys/secrets are preserved."""
@@ -211,6 +228,12 @@ TAG_SERVICE_KEY = FILL_ME_IN
 # "my tags" - set this to a dedicated local tag service (e.g. "tagrank badges") to keep
 # TagRank's own bookkeeping tags out of your real tag service.
 TAGRANK_BADGE_TAG_SERVICE_KEY = FILL_ME_IN
+# Hidden-tag marker file: SHA256 hash of a Hydrus file that TagRank uses to read your
+# hidden-tags list. Tag that file (via the normal "manage tags" dialog) with every tag you want
+# TagRank to ignore. Leave FILL_ME_IN (or blank) to disable this feature and use only
+# config/TAG_FILTERS for exclusions. Get the hash: right-click the file in Hydrus → Share →
+# Copy Hash (SHA256), then paste it here.
+TAGRANK_HIDDEN_TAGS_FILE_HASH = FILL_ME_IN
 # =============================================================
 """
 
@@ -230,6 +253,7 @@ API_LIMIT_FUZZ = 2             # over-fetch multiplier to survive dedup
 POOL_STRATEGY = random         # top | random | bottom | confidence_duel | divergence
 MAX_TOURNAMENT_SIZE = 64       # max images randomly drawn into a Tournament Mode bracket
 FILE_SERVICE_KEY =             # which Hydrus file domain/service to search; blank = Hydrus's default ("my files")
+TAG_UNIVERSE = all             # all | namespaced_only — restrict candidate tags to namespaced tags only for a speed boost?
 
 # ====================== DISTANCE ESCALATION ======================
 MAX_DISTANCE_START = 10    # escalating floor; grows by DISTANCE_STEP below

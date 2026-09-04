@@ -42,7 +42,8 @@ app = FastAPI(
 def _build_tag_index_on_startup() -> None:
     """Pulls every rated tag's file membership + metadata once, up front, so the first
     /search-options or /search-options/filtered call doesn't pay that cost itself (see
-    tagrank/tag_index.py). Runs synchronously before uvicorn starts accepting requests -
+    tagrank/tag_index.py). Also refreshes the hidden-tags marker file on startup so changes
+    in Hydrus are picked up. Runs synchronously before uvicorn starts accepting requests -
     Undertow's tagrank_client already budgets generous startup headroom
     (STARTUP_DEADLINE_SECONDS) for exactly this kind of one-time cost. Best-effort: a failure
     here (e.g. Hydrus not reachable yet) just leaves the index empty, and it gets built lazily
@@ -50,6 +51,8 @@ def _build_tag_index_on_startup() -> None:
     try:
         settings = load_settings()
         client = create_client(settings)
+        from tagrank import hidden_tags
+        hidden_tags.refresh_hidden_tags(client)
         tag_index.ensure_index(client)
     except Exception as e:  # noqa: BLE001 - startup must not crash the server over this
         import logging
